@@ -4,14 +4,14 @@ TrustBridge is a secure, milestone-based escrow payment routing platform designe
 
 Think of it as Stripe, but built from the ground up for secure escrow and programmable payment routing.
 
-## 🚀 Features
+## Features
 
 - **Vertical-Agnostic Escrow**: Designed to integrate seamlessly across any industry—whether for freelancers, digital marketplaces, or corporate service agreements.
 - **Direct Pay-by-Bank Integration**: Eliminates the overhead of virtual IBANs by using direct, open-banking payment rails linked straight to major financial institutions.
 - **Milestone-Based Routing**: Funds are tied to specific, measurable project milestones, ensuring transparency and security for both parties.
 - **Turnkey & Developer-Friendly**: Built with a clean API architecture, making it easy to drop into existing platforms as a dedicated payment layer.
 
-## 🛠️ Tech Stack & Architecture
+## Tech Stack & Architecture
 
 TrustBridge is built with high performance, strict types, and robust architectural patterns in mind:
 
@@ -19,7 +19,7 @@ TrustBridge is built with high performance, strict types, and robust architectur
 - **Architecture**: Event-driven design utilizing State Machines to handle complex, immutable payment lifecycles safely.
 - **Payment Rail**: Open Banking APIs (Pay-by-Bank)
 
-## 🔄 How It Works
+## How It Works
 
 ```
 [ Client ] --(1. Initiates Pay-by-Bank)--> [ TrustBridge Escrow State Machine ]
@@ -38,7 +38,7 @@ TrustBridge is built with high performance, strict types, and robust architectur
 3. **State Locked**: TrustBridge locks the funds, moving the transaction state to `FUNDED`.
 4. **Handoff / Release**: Once the milestone criteria are met, the state transitions, and funds are instantly routed directly to the provider's bank account.
 
-## 💻 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -60,7 +60,7 @@ TrustBridge is built with high performance, strict types, and robust architectur
 3. Build and run the application:
 
    ```bash
-   ./mvnw spring-boot:run
+   ./gradlew bootRun --args='--spring.profiles.active=mock'   
    ```
 
 ## 🛡️ Security & Compliance
