@@ -29,13 +29,16 @@
       <strong>Dispute ID:</strong> <span th:text="${disputeId}">DISP-12345</span>
     </p>
     <p style="margin: 5px 0; color: #333;">
-      <strong>Description / Reason:</strong> <span th:text="${description}">Dispute description goes here.</span>
+      <strong>Job Description:</strong> <span th:text="${description}">Dispute description goes here.</span>
     </p>
     <p style="margin: 5px 0; color: #333;">
       <strong>Original Amount:</strong> <span th:text="${currency + ' ' + #numbers.formatDecimal(amount, 1, 2)}">GBP 0.00</span>
     </p>
     <p style="margin: 5px 0; color: #333;">
-      <strong>Proposed Resolution:</strong> <span th:text="${currency + ' ' + #numbers.formatDecimal(proposedAmount, 1, 2)}">GBP 0.00</span>
+      <strong>Refund Requested by Client:</strong> <span th:text="${currency + ' ' + #numbers.formatDecimal(proposedAmount, 1, 2)}">GBP 0.00</span>
+    </p>
+    <p style="margin: 5px 0; color: #333;">
+      <strong>You Would Receive:</strong> <span th:text="${currency + ' ' + #numbers.formatDecimal(amount.subtract(proposedAmount), 1, 2)}">GBP 0.00</span>
     </p>
   </div>
 
