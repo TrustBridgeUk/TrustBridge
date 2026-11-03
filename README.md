@@ -59,8 +59,14 @@ TrustBridge is built with high performance, strict types, and robust architectur
 
 3. Build and run the application:
 
+    **Developer Testing**
    ```bash
    ./gradlew bootRun --args='--spring.profiles.active=mock'   
+   ```
+
+     **Real Build** 
+   ```bash
+   ./gradlew booRun
    ```
 
 ## 🛡️ Security & Compliance
