@@ -2,6 +2,7 @@ package com.trustbridge.Features.Disputes.StateMachine;
 
 import com.trustbridge.Domain.Enums.DisputeEvent;
 import com.trustbridge.Domain.Enums.DisputeState;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.support.MessageBuilder;
@@ -13,6 +14,7 @@ import org.springframework.statemachine.config.builders.StateMachineTransitionCo
 
 import java.util.EnumSet;
 
+@Slf4j
 @Configuration
 @EnableStateMachineFactory(name = "DisputeStateMachineFactory")
 public class DisputeStateMachineConfig extends EnumStateMachineConfigurerAdapter<DisputeState, DisputeEvent> {
@@ -51,6 +53,14 @@ public class DisputeStateMachineConfig extends EnumStateMachineConfigurerAdapter
                 .source(DisputeState.AWAITING_PROPOSAL).target(DisputeState.AWAITING_DISPUTE_DECISION)
                 .event(DisputeEvent.SUBMIT_PROPOSAL)
                 .action(processProposalAction())
+                .and()
+                .withExternal()
+                .source(DisputeState.AWAITING_PROPOSAL).target(DisputeState.RESOLVED_AGREEMENT)
+                .event(DisputeEvent.ACCEPT_PROPOSAL)
+                .and()
+                .withExternal()
+                .source(DisputeState.AWAITING_PROPOSAL).target(DisputeState.RESOLVED_AGREEMENT)
+                .event(DisputeEvent.ACCEPT_MIDDLE)
                 .and()
                 .withExternal()
                 .source(DisputeState.AWAITING_DISPUTE_DECISION).target(DisputeState.RESOLVED_AGREEMENT)
@@ -102,11 +112,10 @@ public class DisputeStateMachineConfig extends EnumStateMachineConfigurerAdapter
             // 3. Save it back to memory
             context.getExtendedState().getVariables().put("negotiationRound", currentRound);
 
-            System.out.println("Processing Proposal... This is round " + currentRound);
+            log.info("Processing Proposal... This is round {}", currentRound);
 
-            // 4. THE MAGIC CHECK
             if (currentRound >= 3) {
-                System.out.println("Maximum negotiation rounds reached! Escalating to Arbitration.");
+                log.info("Maximum negotiation rounds reached! Escalating to Arbitration.");
                 // Fire the ESCALATE event automatically!
                 context.getStateMachine().sendEvent(
                         MessageBuilder.withPayload(DisputeEvent.ESCALATE).build()
