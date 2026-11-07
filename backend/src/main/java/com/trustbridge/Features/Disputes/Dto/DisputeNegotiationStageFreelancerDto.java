@@ -13,6 +13,8 @@ public record DisputeNegotiationStageFreelancerDto(
         String reason,
         List<DisputeSubmissionFileDto> files,
         BigDecimal clientProposedAmount,
-        BigDecimal originalAmount
+        BigDecimal originalAmount,
+        String state,
+        BigDecimal freelancerProposedAmount
 ) {
 }

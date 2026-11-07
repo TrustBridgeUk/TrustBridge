@@ -201,7 +201,9 @@ public class DisputeService {
                 disputeEvidence.getReason(),
                 files,
                 disputeEvidence.getDispute().getClientProposedAmount(),
-                disputeEvidence.getDispute().getMilestone().getAmount()
+                disputeEvidence.getDispute().getMilestone().getAmount(),
+                disputeEvidence.getDispute().getState().name(),
+                disputeEvidence.getDispute().getFreelancerProposedAmount()
         );
     }
 }
