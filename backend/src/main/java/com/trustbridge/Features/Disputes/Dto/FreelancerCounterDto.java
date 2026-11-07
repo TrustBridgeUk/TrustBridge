@@ -3,6 +3,7 @@ package com.trustbridge.Features.Disputes.Dto;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.PositiveOrZero;
 
+import java.math.BigDecimal;
 import java.math.BigInteger;
 
 /**
@@ -12,5 +13,5 @@ import java.math.BigInteger;
  * The amount is expected to be present and must not be negative.
  */
 public record FreelancerCounterDto(
-        @NotNull @PositiveOrZero BigInteger refundAmount
+        @NotNull @PositiveOrZero BigDecimal refundAmount
 ) { }

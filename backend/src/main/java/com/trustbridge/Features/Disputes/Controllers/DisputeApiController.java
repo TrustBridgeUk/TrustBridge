@@ -1,5 +1,6 @@
 package com.trustbridge.Features.Disputes.Controllers;
 
+import com.trustbridge.Features.Disputes.Dto.FreelancerCounterDto;
 import com.trustbridge.Features.Disputes.Dto.DisputeCreationDto;
 import com.trustbridge.Features.Disputes.Dto.DisputeNegotiationStageFreelancerDto;
 import com.trustbridge.Features.Disputes.Dto.DisputeOpenedResult;
@@ -50,5 +51,25 @@ public class DisputeApiController {
     public ResponseEntity<DisputeNegotiationStageFreelancerDto> getDisputeSubmissionForFreelancer(@PathVariable String inviteToken) {
 
         return ResponseEntity.ok(disputeService.getDisputeSubmissionForFreelancer(inviteToken));
+    }
+
+    /**
+     * Freelancer accepts the client's requested refund. Resolves the dispute.
+     */
+    @PostMapping("/invite/{inviteToken}/accept")
+    public ResponseEntity<String> acceptClientProposal(@PathVariable String inviteToken) {
+        disputeService.acceptClientProposal(inviteToken);
+        return ResponseEntity.ok("Dispute resolved");
+    }
+
+    /**
+     * Freelancer counters with a smaller refund (0 = no refund). Passes the turn to the client.
+     */
+    @PostMapping("/invite/{inviteToken}/counter")
+    public ResponseEntity<String> submitCounterProposal(
+            @PathVariable String inviteToken,
+            @RequestBody @Valid FreelancerCounterDto dto) {
+        disputeService.submitCounterProposal(inviteToken, dto);
+        return ResponseEntity.ok("Counter-offer submitted");
     }
 }

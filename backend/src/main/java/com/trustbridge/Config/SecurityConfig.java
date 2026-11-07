@@ -1,5 +1,6 @@
 package com.trustbridge.Config;
 
+import com.sun.net.httpserver.HttpsServer;
 import com.trustbridge.Security.JwtAuthenticationFilter; // Adjust this import if your filter is in a different package
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -69,6 +70,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/**", "/api/invite/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/disputes/open-dispute").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/disputes/invite/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/v1/disputes/invite/**").permitAll()
                         .requestMatchers("/api/files/**").authenticated()
                         .requestMatchers("/api/milestone/review/**", "/api/milestone/approve/**", "/api/milestone/request-changes/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/payment-requests/**").permitAll()

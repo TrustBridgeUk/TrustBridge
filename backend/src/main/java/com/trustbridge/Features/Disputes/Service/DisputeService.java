@@ -1,6 +1,7 @@
 package com.trustbridge.Features.Disputes.Service;
 
 import com.trustbridge.Domain.Entities.*;
+import com.trustbridge.Domain.Enums.DisputeState;
 import com.trustbridge.Domain.Enums.MilestoneStatus;
 import com.trustbridge.Domain.Repositories.*;
 import com.trustbridge.Features.Disputes.Dto.*;
@@ -16,6 +17,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -178,6 +181,58 @@ public class DisputeService {
         }
     }
 
+
+    /**
+     * Freelancer agrees to the client's requested refund. Resolves the dispute.
+     * (All dispute amounts mean "refund to the client"; the freelancer gets the rest.)
+     */
+    @Transactional
+    public void acceptClientProposal(String inviteToken) {
+        Dispute dispute = findDisputeAwaitingFreelancer(inviteToken);
+
+        dispute.setFinalSettlementAmount(dispute.getClientProposedAmount());
+        dispute.setResolutionReason("Freelancer accepted the client's proposed refund.");
+
+        disputeStateService.disputeProposalAccepted(dispute.getId());
+    }
+
+    /**
+     * Freelancer counters with a smaller refund (0 = no refund). Passes the turn to the client.
+     */
+    @Transactional
+    public void submitCounterProposal(String inviteToken, FreelancerCounterDto dto) {
+        Dispute dispute = findDisputeAwaitingFreelancer(inviteToken);
+
+        BigDecimal refund = dto.refundAmount().setScale(2, RoundingMode.HALF_UP);
+
+        if (refund.compareTo(dispute.getClientProposedAmount()) >= 0) {
+            throw new IllegalArgumentException(
+                    "Your counter-offer must be a smaller refund than the client's request. "
+                            + "To agree to the client's request, use Accept instead.");
+        }
+
+        dispute.setFreelancerProposedAmount(refund);
+        dispute.setNegotiationRound(dispute.getNegotiationRound() + 1);
+
+        disputeStateService.disputeProposalSubmitted(dispute.getId());
+    }
+
+    /**
+     * Finds the dispute for an invite token and makes sure it is the freelancer's turn.
+     * Bad token -> "not authorized" (403). Wrong turn -> 409.
+     */
+    private Dispute findDisputeAwaitingFreelancer(String inviteToken) {
+        DisputeEvidenceSubmission evidence = disputeEvidenceSubmissionRepository.findByInviteToken(inviteToken)
+                .orElseThrow(() -> new AccessDeniedException("Not authorized"));
+
+        Dispute dispute = evidence.getDispute();
+
+        if (dispute.getState() != DisputeState.AWAITING_PROPOSAL) {
+            throw new IllegalStateException("This dispute is not waiting for your response");
+        }
+
+        return dispute;
+    }
 
     public DisputeNegotiationStageFreelancerDto getDisputeSubmissionForFreelancer(String inviteToken) {
 

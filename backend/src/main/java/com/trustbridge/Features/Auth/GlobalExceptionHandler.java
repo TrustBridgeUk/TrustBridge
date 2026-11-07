@@ -56,7 +56,8 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, String>> handleIllegalArgumentException(IllegalArgumentException ex) {
-        return ResponseEntity.status(400).body(new HashMap<>());
+        String message = ex.getMessage() != null ? ex.getMessage() : "Invalid request";
+        return ResponseEntity.status(400).body(Map.of("message", message));
     }
 
     @ExceptionHandler(AccessDeniedException.class)
