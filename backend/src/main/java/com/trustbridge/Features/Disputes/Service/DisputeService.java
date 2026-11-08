@@ -24,6 +24,7 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.List;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -31,6 +32,8 @@ import java.util.List;
 public class DisputeService {
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+    /** After this many rejected counter-offers, the dispute goes to arbitration. */
+    private static final int MAX_NEGOTIATION_ROUNDS = 3;
 
     private final DisputeRepository disputeRepository;
     private final DisputeStateService disputeStateService;
@@ -228,6 +231,78 @@ public class DisputeService {
         Dispute dispute = evidence.getDispute();
 
         if (dispute.getState() != DisputeState.AWAITING_PROPOSAL) {
+            throw new IllegalStateException("This dispute is not waiting for your response");
+        }
+
+        return dispute;
+    }
+
+    /**
+     * Client agrees to the freelancer's counter-offer. Resolves the dispute.
+     */
+    @Transactional
+    public void acceptFreelancerCounter(UUID milestoneId, String reviewToken) {
+        Dispute dispute = findDisputeAwaitingClient(milestoneId, reviewToken);
+
+        dispute.setFinalSettlementAmount(dispute.getFreelancerProposedAmount());
+        dispute.setResolutionReason("Client accepted the freelancer's counter-offer.");
+
+        disputeStateService.disputeProposalAccepted(dispute.getId());
+    }
+
+    /**
+     * Client agrees to the midpoint between the two offers. Resolves the dispute.
+     */
+    @Transactional
+    public void acceptMiddle(UUID milestoneId, String reviewToken) {
+        Dispute dispute = findDisputeAwaitingClient(milestoneId, reviewToken);
+
+        dispute.setFinalSettlementAmount(calculateMiddle(dispute));
+        dispute.setResolutionReason("Client accepted the midpoint between both offers.");
+
+        disputeStateService.disputeMiddleAccepted(dispute.getId());
+    }
+
+    /**
+     * Client rejects the freelancer's counter-offer. Goes back to the freelancer,
+     * unless the maximum number of rounds has been reached - then it escalates.
+     */
+    @Transactional
+    public void rejectFreelancerCounter(UUID milestoneId, String reviewToken) {
+        Dispute dispute = findDisputeAwaitingClient(milestoneId, reviewToken);
+
+        disputeStateService.disputeProposalRejected(dispute.getId());
+
+        if (dispute.getNegotiationRound() >= MAX_NEGOTIATION_ROUNDS) {
+            disputeStateService.disputeEscalated(dispute.getId());
+        }
+    }
+
+    /**
+     * The midpoint between the client's requested refund and the freelancer's counter-offer,
+     * rounded to 2 decimal places.
+     */
+    public static BigDecimal calculateMiddle(Dispute dispute) {
+        return dispute.getClientProposedAmount()
+                .add(dispute.getFreelancerProposedAmount())
+                .divide(BigDecimal.valueOf(2), 2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Proves the caller is the client (review token), finds the dispute, and makes sure
+     * it is the client's turn. Bad token -> "not authorized" (403). Wrong turn -> 409.
+     */
+    private Dispute findDisputeAwaitingClient(UUID milestoneId, String reviewToken) {
+        Milestones milestone = milestoneRepository.findById(milestoneId)
+                .orElseThrow(() -> new AccessDeniedException("Not authorized"));
+
+        verifyReviewToken(milestone, reviewToken);
+
+        Dispute dispute = disputeRepository.findByMilestoneId(milestoneId)
+                .orElseThrow(() -> new IllegalStateException("No dispute exists for this milestone"));
+
+        if (dispute.getState() != DisputeState.AWAITING_DISPUTE_DECISION
+                || dispute.getFreelancerProposedAmount() == null) {
             throw new IllegalStateException("This dispute is not waiting for your response");
         }
 
