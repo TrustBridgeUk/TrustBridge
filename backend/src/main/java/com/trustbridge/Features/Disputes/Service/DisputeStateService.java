@@ -194,7 +194,7 @@ public class DisputeStateService {
      * @param disputeId the unique identifier of the dispute that is being escalated
      */
     public void disputeEscalated(UUID disputeId) {
-        fireEvent(disputeId, DisputeEvent.REJECT_PROPOSAL);
+        fireEvent(disputeId, DisputeEvent.ESCALATE);
     }
 
     /**

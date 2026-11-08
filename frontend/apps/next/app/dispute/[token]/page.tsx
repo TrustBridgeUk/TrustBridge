@@ -10,6 +10,9 @@ import {
     Briefcase,
     MessageSquareWarning,
     Landmark,
+    CheckCircle2,
+    Clock,
+    Scale,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -31,6 +34,8 @@ interface DisputeNegotiationDto {
     files: DisputeFileDto[];
     clientProposedAmount: number;
     originalAmount: number;
+    state: string;
+    freelancerProposedAmount: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +53,10 @@ export default function FreelancerDisputePage({
     const [dispute, setDispute] = useState<DisputeNegotiationDto | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [showCounter, setShowCounter] = useState(false);
+    const [counterAmount, setCounterAmount] = useState("");
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [actionError, setActionError] = useState<string | null>(null);
 
     const fetchDispute = useCallback(async () => {
         try {
@@ -71,6 +80,63 @@ export default function FreelancerDisputePage({
     useEffect(() => {
         fetchDispute();
     }, [fetchDispute]);
+
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+
+    // Sends one of the freelancer's responses, then reloads the dispute so the page shows the new state.
+    const sendResponse = async (action: "accept" | "counter", body?: object) => {
+        setIsSubmitting(true);
+        setActionError(null);
+        try {
+            const response = await fetch(`${apiBase}/api/v1/disputes/invite/${token}/${action}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: body ? JSON.stringify(body) : undefined,
+            });
+
+            if (!response.ok) {
+                let message = "Something went wrong. Please try again.";
+                if (response.status === 409) {
+                    message = "This dispute is no longer waiting for your response. Please refresh the page.";
+                } else {
+                    try {
+                        const data = await response.json();
+                        if (data?.message) message = data.message;
+                    } catch {
+                        /* empty response body */
+                    }
+                }
+                throw new Error(message);
+            }
+
+            setShowCounter(false);
+            setCounterAmount("");
+            await fetchDispute();
+        } catch (err: any) {
+            setActionError(err.message);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const handleAccept = () => sendResponse("accept");
+
+    const handleCounter = () => {
+        if (!dispute) return;
+
+        const refund = Number(counterAmount);
+        if (counterAmount.trim() === "" || Number.isNaN(refund) || refund < 0) {
+            setActionError("Enter a refund amount of 0 or more.");
+            return;
+        }
+        if (refund >= dispute.clientProposedAmount) {
+            setActionError(
+                "Your counter-offer must be smaller than the client's refund request. To agree to their request, use Accept instead."
+            );
+            return;
+        }
+        sendResponse("counter", { refundAmount: refund });
+    };
 
     // ---------------------------------------------------------------------------
     // LOADING VIEW
@@ -206,7 +272,131 @@ export default function FreelancerDisputePage({
                         )}
                     </div>
 
-                    {/* 2D: the accept / reject / counter-offer buttons go here */}
+                    {/* ---------- RESPONSE SECTION ---------- */}
+
+                    {/* Freelancer's turn: accept or counter */}
+                    {dispute.state === "AWAITING_PROPOSAL" && (
+                        <div className="bg-white dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800 rounded-3xl p-8">
+                            <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-neutral-500 mb-2">
+                                <Scale size={14} /> Your response
+                            </h2>
+                            <p className="text-sm text-slate-500 dark:text-neutral-400 mb-6 leading-relaxed">
+                                You can accept the client&#39;s refund request, or counter with a smaller refund. A refund of 0 means no refund.
+                            </p>
+
+                            {actionError && (
+                                <div className="mb-6 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl p-4 flex items-start gap-3 text-red-600 dark:text-red-400">
+                                    <AlertCircle size={18} className="shrink-0 mt-0.5" />
+                                    <p className="text-sm font-medium leading-relaxed">{actionError}</p>
+                                </div>
+                            )}
+
+                            <div className="flex flex-col sm:flex-row gap-3">
+                                <button
+                                    onClick={() => {
+                                        if (
+                                            window.confirm(
+                                                `Accept the client's request? ${formatAmount(freelancerReceives)} will be released to you and ${formatAmount(dispute.clientProposedAmount)} refunded to the client. This cannot be undone.`
+                                            )
+                                        ) {
+                                            handleAccept();
+                                        }
+                                    }}
+                                    disabled={isSubmitting}
+                                    className="flex items-center justify-center gap-2 bg-[#0A3D1A] hover:bg-[#0F5525] disabled:opacity-50 text-white font-bold text-sm px-6 py-3 rounded-full transition-colors"
+                                >
+                                    {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                                    Accept and resolve
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setShowCounter(!showCounter);
+                                        setActionError(null);
+                                    }}
+                                    disabled={isSubmitting}
+                                    className="flex items-center justify-center gap-2 border border-slate-300 dark:border-neutral-700 hover:bg-slate-50 dark:hover:bg-neutral-800 disabled:opacity-50 text-slate-700 dark:text-neutral-200 font-bold text-sm px-6 py-3 rounded-full transition-colors"
+                                >
+                                    Make a counter-offer
+                                </button>
+                            </div>
+
+                            {showCounter && (
+                                <div className="mt-6 bg-slate-50 dark:bg-neutral-950 border border-slate-200 dark:border-neutral-800 rounded-2xl p-6">
+                                    <label className="block text-xs font-semibold text-slate-500 dark:text-neutral-400 mb-2">
+                                        Refund you are willing to give the client
+                                    </label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        value={counterAmount}
+                                        onChange={(e) => setCounterAmount(e.target.value)}
+                                        placeholder="0.00"
+                                        className="w-full sm:w-64 bg-white dark:bg-neutral-900 border border-slate-300 dark:border-neutral-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:border-[#3FCD6B]"
+                                    />
+                                    {counterAmount.trim() !== "" && !Number.isNaN(Number(counterAmount)) && Number(counterAmount) >= 0 && (
+                                        <p className="text-sm text-slate-500 dark:text-neutral-400 mt-3">
+                                            You would receive{" "}
+                                            <span className="font-bold text-[#0A3D1A] dark:text-[#3FCD6B]">
+                                                {formatAmount(dispute.originalAmount - Number(counterAmount))}
+                                            </span>
+                                            .
+                                        </p>
+                                    )}
+                                    <button
+                                        onClick={handleCounter}
+                                        disabled={isSubmitting}
+                                        className="mt-4 flex items-center justify-center gap-2 bg-[#0A3D1A] hover:bg-[#0F5525] disabled:opacity-50 text-white font-bold text-sm px-6 py-3 rounded-full transition-colors"
+                                    >
+                                        {isSubmitting && <Loader2 size={16} className="animate-spin" />}
+                                        Send counter-offer
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Client's turn: waiting */}
+                    {dispute.state === "AWAITING_DISPUTE_DECISION" && (
+                        <div className="bg-white dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800 rounded-3xl p-8">
+                            <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-neutral-500 mb-4">
+                                <Clock size={14} /> Waiting for the client
+                            </h2>
+                            <p className="text-slate-700 dark:text-neutral-300 leading-relaxed">
+                                You offered a refund of{" "}
+                                <span className="font-bold">{formatAmount(dispute.freelancerProposedAmount ?? 0)}</span>. If the client accepts, you
+                                would receive{" "}
+                                <span className="font-bold text-[#0A3D1A] dark:text-[#3FCD6B]">
+                                    {formatAmount(dispute.originalAmount - (dispute.freelancerProposedAmount ?? 0))}
+                                </span>
+                                . We will email you when they respond.
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Resolved */}
+                    {dispute.state === "RESOLVED_AGREEMENT" && (
+                        <div className="bg-[#e1f5ee] dark:bg-[#3FCD6B]/10 border border-[#3FCD6B]/30 rounded-3xl p-8">
+                            <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[#0f6e56] dark:text-[#3FCD6B] mb-4">
+                                <CheckCircle2 size={14} /> Dispute resolved
+                            </h2>
+                            <p className="text-slate-700 dark:text-neutral-300 leading-relaxed">
+                                An agreement has been reached and recorded. Thank you for resolving this.
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Any other stage (arbitration etc.) */}
+                    {!["AWAITING_PROPOSAL", "AWAITING_DISPUTE_DECISION", "RESOLVED_AGREEMENT"].includes(dispute.state) && (
+                        <div className="bg-white dark:bg-neutral-900 border border-slate-200 dark:border-neutral-800 rounded-3xl p-8">
+                            <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-neutral-500 mb-4">
+                                <Scale size={14} /> In progress
+                            </h2>
+                            <p className="text-slate-700 dark:text-neutral-300 leading-relaxed">
+                                This dispute is being handled by TrustBridge. We will contact you if we need anything from you.
+                            </p>
+                        </div>
+                    )}
                 </div>
             </div>
         </div>

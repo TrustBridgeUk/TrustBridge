@@ -52,7 +52,6 @@ public class DisputeStateMachineConfig extends EnumStateMachineConfigurerAdapter
                 .withExternal()
                 .source(DisputeState.AWAITING_PROPOSAL).target(DisputeState.AWAITING_DISPUTE_DECISION)
                 .event(DisputeEvent.SUBMIT_PROPOSAL)
-                .action(processProposalAction())
                 .and()
                 .withExternal()
                 .source(DisputeState.AWAITING_PROPOSAL).target(DisputeState.RESOLVED_AGREEMENT)
