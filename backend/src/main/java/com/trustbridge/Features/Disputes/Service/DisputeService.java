@@ -9,7 +9,7 @@ import com.trustbridge.Features.Jobs.Service.FileStorageService;
 import com.trustbridge.Features.Jobs.Service.JobStateService;
 import com.trustbridge.Features.Jobs.Service.MilestoneStateService;
 import com.trustbridge.Features.Notifications.Listeners.DisputeEmailListener;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.access.AccessDeniedException;
@@ -235,6 +235,39 @@ public class DisputeService {
         }
 
         return dispute;
+    }
+
+    /**
+     * Everything the client's response page needs. Requires the milestone's review token.
+     */
+    @Transactional(readOnly = true)
+    public DisputeClientViewDto getDisputeForClient(UUID milestoneId, String reviewToken) {
+        Milestones milestone = milestoneRepository.findById(milestoneId)
+                .orElseThrow(() -> new AccessDeniedException("Not authorized"));
+
+        verifyReviewToken(milestone, reviewToken);
+
+        Dispute dispute = disputeRepository.findByMilestoneId(milestoneId)
+                .orElseThrow(() -> new IllegalStateException("No dispute exists for this milestone"));
+
+        DisputeEvidenceSubmission evidence = disputeEvidenceSubmissionRepository.findByDisputeId(dispute.getId());
+
+        BigDecimal middle = dispute.getFreelancerProposedAmount() == null
+                ? null
+                : calculateMiddle(dispute);
+
+        return new DisputeClientViewDto(
+                milestone.getJob().getTitle(),
+                milestone.getTitle(),
+                dispute.getId().toString(),
+                evidence != null ? evidence.getReason() : null,
+                milestone.getAmount(),
+                dispute.getClientProposedAmount(),
+                dispute.getFreelancerProposedAmount(),
+                middle,
+                dispute.getState().name(),
+                dispute.getNegotiationRound()
+        );
     }
 
     /**

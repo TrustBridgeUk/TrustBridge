@@ -1,9 +1,6 @@
 package com.trustbridge.Features.Disputes.Controllers;
 
-import com.trustbridge.Features.Disputes.Dto.FreelancerCounterDto;
-import com.trustbridge.Features.Disputes.Dto.DisputeCreationDto;
-import com.trustbridge.Features.Disputes.Dto.DisputeNegotiationStageFreelancerDto;
-import com.trustbridge.Features.Disputes.Dto.DisputeOpenedResult;
+import com.trustbridge.Features.Disputes.Dto.*;
 import com.trustbridge.Features.Disputes.Service.DisputeService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -13,6 +10,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
+import java.util.UUID;
 
 @RequiredArgsConstructor
 @RestController
@@ -71,5 +69,48 @@ public class DisputeApiController {
             @RequestBody @Valid FreelancerCounterDto dto) {
         disputeService.submitCounterProposal(inviteToken, dto);
         return ResponseEntity.ok("Counter-offer submitted");
+    }
+
+    /**
+     * The client's view of their dispute. Proven by the milestone's review token.
+     */
+    @GetMapping("/milestone/{milestoneId}")
+    public ResponseEntity<DisputeClientViewDto> getDisputeForClient(
+            @PathVariable UUID milestoneId,
+            @RequestHeader("X-Review-Token") String reviewToken) {
+        return ResponseEntity.ok(disputeService.getDisputeForClient(milestoneId, reviewToken));
+    }
+
+    /**
+     * Client accepts the freelancer's counter-offer. Resolves the dispute.
+     */
+    @PostMapping("/milestone/{milestoneId}/accept-counter")
+    public ResponseEntity<String> acceptFreelancerCounter(
+            @PathVariable UUID milestoneId,
+            @RequestHeader("X-Review-Token") String reviewToken) {
+        disputeService.acceptFreelancerCounter(milestoneId, reviewToken);
+        return ResponseEntity.ok("Dispute resolved");
+    }
+
+    /**
+     * Client accepts the midpoint between both offers. Resolves the dispute.
+     */
+    @PostMapping("/milestone/{milestoneId}/accept-middle")
+    public ResponseEntity<String> acceptMiddle(
+            @PathVariable UUID milestoneId,
+            @RequestHeader("X-Review-Token") String reviewToken) {
+        disputeService.acceptMiddle(milestoneId, reviewToken);
+        return ResponseEntity.ok("Dispute resolved");
+    }
+
+    /**
+     * Client rejects the freelancer's counter-offer. Back to the freelancer, or escalated after 3 rounds.
+     */
+    @PostMapping("/milestone/{milestoneId}/reject")
+    public ResponseEntity<String> rejectFreelancerCounter(
+            @PathVariable UUID milestoneId,
+            @RequestHeader("X-Review-Token") String reviewToken) {
+        disputeService.rejectFreelancerCounter(milestoneId, reviewToken);
+        return ResponseEntity.ok("Counter-offer rejected");
     }
 }
