@@ -1,5 +1,6 @@
 package com.trustbridge.Features.Disputes.Service;
 
+import aj.org.objectweb.asm.commons.TryCatchBlockSorter;
 import com.trustbridge.Domain.Entities.*;
 import com.trustbridge.Domain.Enums.DisputeState;
 import com.trustbridge.Domain.Enums.MilestoneStatus;
@@ -203,7 +204,7 @@ public class DisputeService {
      * Freelancer counters with a smaller refund (0 = no refund). Passes the turn to the client.
      */
     @Transactional
-    public void submitCounterProposal(String inviteToken, FreelancerCounterDto dto) {
+    public UUID submitCounterProposal(String inviteToken, FreelancerCounterDto dto) {
         Dispute dispute = findDisputeAwaitingFreelancer(inviteToken);
 
         BigDecimal refund = dto.refundAmount().setScale(2, RoundingMode.HALF_UP);
@@ -217,9 +218,28 @@ public class DisputeService {
         dispute.setFreelancerProposedAmount(refund);
         dispute.setNegotiationRound(dispute.getNegotiationRound() + 1);
 
-        disputeStateService.disputeProposalSubmitted(dispute.getId());
+        return dispute.getMilestone().getId();
     }
 
+    @Transactional(readOnly = true)
+    public void sendCounterOfferEmail(UUID milestoneId) {
+        try {
+            Milestones milestone = milestoneRepository.findById(milestoneId)
+                    .orElseThrow(() -> new IllegalArgumentException("Milestone not found"));
+
+            Dispute dispute = disputeRepository.findByMilestoneId(milestoneId)
+                    .orElseThrow(() -> new IllegalArgumentException("Dispute not found"));
+
+            MilestoneSubmissions latest = milestoneSubmissionRepository.findTopByMilestoneIdOrderByCreatedAtDesc(milestoneId)
+                    .orElseThrow(() -> new IllegalArgumentException("Milestone submission not found"));
+
+            disputeEmailListener.freelancerCounterDispute(
+                    milestone, dispute, calculateMiddle(dispute), latest.getReviewToken());
+        } catch (Exception e) {
+            log.error("Counter-offer saved for milestone {} but the client email failed: {}",
+                    milestoneId, e.getMessage());
+        }
+    }
     /**
      * Finds the dispute for an invite token and makes sure it is the freelancer's turn.
      * Bad token -> "not authorized" (403). Wrong turn -> 409.
