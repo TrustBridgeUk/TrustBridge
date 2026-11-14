@@ -67,7 +67,8 @@ public class DisputeApiController {
     public ResponseEntity<String> submitCounterProposal(
             @PathVariable String inviteToken,
             @RequestBody @Valid FreelancerCounterDto dto) {
-        disputeService.submitCounterProposal(inviteToken, dto);
+        UUID milestoneId = disputeService.submitCounterProposal(inviteToken, dto);
+        disputeService.sendCounterOfferEmail(milestoneId);
         return ResponseEntity.ok("Counter-offer submitted");
     }
 
