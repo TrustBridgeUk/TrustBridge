@@ -19,7 +19,7 @@ public enum PublicRegistrationRole {
         return userRole;
     }
 
-    @JsonCreator
+    @JsonCreator(mode = JsonCreator.Mode.DELEGATING)
     public static PublicRegistrationRole from(String value) {
         if (value == null) {
             throw new IllegalArgumentException("Role is required");
