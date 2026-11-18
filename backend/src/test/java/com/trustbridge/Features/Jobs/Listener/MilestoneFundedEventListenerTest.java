@@ -39,7 +39,6 @@ import static org.mockito.Mockito.when;
  * The funded listener used to set the milestone and job to IN_PROGRESS directly, skipping the
  * state machine (and its guard) completely. These tests say: a funding event must not advance
  * anything unless the payment is really PAID, and the advance must go through the state machine.
- *
  * The mocks include PaymentRequestRepository and MilestoneStateService even though the current
  * constructor does not take them. @InjectMocks uses whichever it needs, so the test compiles
  * before and after you add those dependencies.
