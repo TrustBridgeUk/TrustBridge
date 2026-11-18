@@ -209,6 +209,10 @@ public class DisputeService {
 
         BigDecimal refund = dto.refundAmount().setScale(2, RoundingMode.HALF_UP);
 
+        if (dispute.getNegotiationRound() >= MAX_NEGOTIATION_ROUNDS) {
+            throw new IllegalStateException("Maximum negotiation rounds reached");
+        }
+
         if (refund.compareTo(dispute.getClientProposedAmount()) >= 0) {
             throw new IllegalArgumentException(
                     "Your counter-offer must be a smaller refund than the client's request. "
