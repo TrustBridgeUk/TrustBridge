@@ -221,6 +221,8 @@ public class DisputeService {
         dispute.setFreelancerProposedAmount(refund);
         dispute.setNegotiationRound(dispute.getNegotiationRound() + 1);
 
+        disputeStateService.disputeProposalSubmitted(dispute.getId());
+
         return dispute.getMilestone().getId();
     }
 
