@@ -153,6 +153,7 @@ class RegistrationServiceTest {
         verify(userRepository).save(userCaptor.capture());
 
         Users savedUser = userCaptor.getValue();
+
         assertThat(savedUser.getEmail()).isEqualTo(dto.email());
         assertThat(savedUser.getFirstName()).isEqualTo(dto.firstName());
         assertThat(savedUser.getLastName()).isEqualTo(dto.lastName());
