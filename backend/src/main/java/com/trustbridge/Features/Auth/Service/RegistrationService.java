@@ -55,17 +55,8 @@ public class RegistrationService {
             throw new RuntimeException("Email already in use");
         }
 
-        role role;
-
-        switch (dto.role()) {
-            case "freelancer":
-                role = UserRole.role.FREELANCER; break;
-            case "client":
-                role = UserRole.role.CLIENT; break;
-            case "admin":
-                role = UserRole.role.ADMIN; break;
-            default:
-                role = UserRole.role.CLIENT_GUEST;
+        if (dto.role() == null) {
+            throw new IllegalArgumentException("Role is required");
         }
 
         Users newUser = Users.builder()
@@ -73,7 +64,7 @@ public class RegistrationService {
                 .password(passwordEncoder.encode(dto.password()))
                 .firstName(dto.firstName())
                 .lastName(dto.lastName())
-                .userRole(role)
+                .userRole(dto.role().getUserRole())
                 .phoneNumber(dto.phoneNumber())
                 .verificationCode(VerificationCode())
                 .isVerified(false)
