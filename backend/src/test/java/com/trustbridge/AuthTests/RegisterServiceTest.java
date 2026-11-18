@@ -3,6 +3,7 @@ package com.trustbridge.AuthTests;
 import com.trustbridge.Domain.Entities.Users;
 import com.trustbridge.Domain.Enums.UserRole;
 import com.trustbridge.Domain.Repositories.UserRepository;
+import com.trustbridge.Features.Auth.Dto.PublicRegistrationRole;
 import com.trustbridge.Features.Auth.Dto.RegistrationDTO;
 import com.trustbridge.Features.Auth.Service.RegistrationService;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,7 +49,7 @@ class RegistrationServiceTest {
                 "encodedPassword",
                 "test",
                 "test",
-                "freelancer"
+                PublicRegistrationRole.FREELANCER
         );
     }
 
@@ -108,7 +109,7 @@ class RegistrationServiceTest {
                 rawPassword,
                 "test",
                 "test",
-                "client"
+                PublicRegistrationRole.CLIENT
         );
 
         when(userRepository.findByEmail(dto.email())).thenReturn(Optional.empty());
@@ -137,7 +138,7 @@ class RegistrationServiceTest {
                 "testpassword!!11",
                 "test",
                 "test",
-                "client"
+                PublicRegistrationRole.CLIENT
         );
 
         when(userRepository.findByEmail(dto.email())).thenReturn(Optional.empty());
@@ -159,27 +160,20 @@ class RegistrationServiceTest {
     }
 
     @Test
-    void register_WithDifferentRole_ShouldSaveCorrectRole() {
-        // Arrange
-        RegistrationDTO adminDto = new RegistrationDTO(
-                "admin@example.com",
+    void register_WithNullRole_ShouldBeRejected_AndSaveNothing() {
+        RegistrationDTO dto = new RegistrationDTO(
+                "norole@example.com",
                 "07357365478",
                 "testpassword123!",
                 "test",
                 "test",
-                "admin"
+                null
         );
 
-        when(userRepository.findByEmail(adminDto.email())).thenReturn(Optional.empty());
-        when(passwordEncoder.encode(adminDto.password())).thenReturn("encoded");
+        assertThatThrownBy(() -> registrationService.registerPreVerification(dto))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Role is required");
 
-        ArgumentCaptor<Users> userCaptor = ArgumentCaptor.forClass(Users.class);
-
-        // Act
-        registrationService.registerPreVerification(adminDto);
-
-        // Assert
-        verify(userRepository).save(userCaptor.capture());
-        assertThat(userCaptor.getValue().getUserRole()).isEqualTo(UserRole.role.ADMIN);
+        verify(userRepository, never()).save(any(Users.class));
     }
 }

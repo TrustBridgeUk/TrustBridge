@@ -26,5 +26,5 @@ public record RegistrationDTO(
         String lastName,
 
         @NotNull(message = "Role is required")
-        String role
+        PublicRegistrationRole role
 ) {}
