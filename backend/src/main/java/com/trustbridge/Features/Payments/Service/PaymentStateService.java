@@ -59,22 +59,21 @@ public class PaymentStateService {
 
     public void fireEvent(UUID paymentId, PaymentRequestEvent event, String guardKey) {
         StateMachine<PaymentRequestStatus, PaymentRequestEvent> sm = buildStateMachine(paymentId);
+        PaymentRequestStatus before = sm.getState().getId();
 
         Message<PaymentRequestEvent> message = MessageBuilder
                 .withPayload(event)
                 .setHeader("paymentRequestId", paymentId)
-                .setHeader(guardKey, true)
+                .setHeader(guardKey, true) // TODO: forged flag, replaced by real guards once the provider check exists
                 .build();
 
-        sm.sendEvent(Mono.just(message)).subscribe();
+        sm.sendEvent(Mono.just(message)).blockLast();
 
-        sm.sendEvent(Mono.just(message)).subscribe(result -> {
-            if (result.getResultType() == org.springframework.statemachine.StateMachineEventResult.ResultType.DENIED) {
-                System.out.println("❌ TRANSITION DENIED! Event: " + event + " | Current DB State: " + sm.getState().getId());
-            } else if (result.getResultType() == org.springframework.statemachine.StateMachineEventResult.ResultType.ACCEPTED) {
-                System.out.println("✅ TRANSITION ACCEPTED! Event: " + event);
-            }
-        });
+        PaymentRequestStatus after = sm.getState().getId();
+        if (after == before) {
+            throw new IllegalStateException(
+                    "Transition blocked for event " + event + ": payment " + paymentId + " stayed in " + before);
+        }
     }
 
     public void initiatePayment(UUID paymentId) {

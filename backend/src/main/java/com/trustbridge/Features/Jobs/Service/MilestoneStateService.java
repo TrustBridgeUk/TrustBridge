@@ -134,6 +134,7 @@ public class MilestoneStateService {
      */
     public void fireEvent(UUID milestoneId, milestoneEvent event, Map<String, Object> extraHeaders) {
         StateMachine<MilestoneStatus, milestoneEvent> sm = buildStateMachine(milestoneId);
+        MilestoneStatus before = sm.getState().getId();
 
         MessageBuilder<milestoneEvent> builder = MessageBuilder
                 .withPayload(event)
@@ -141,11 +142,12 @@ public class MilestoneStateService {
 
         extraHeaders.forEach(builder::setHeader);
 
-        var result = sm.sendEvent(Mono.just(builder.build())).blockLast();
+        sm.sendEvent(Mono.just(builder.build())).blockLast();
 
-        boolean accepted = result != null && result.getResultType() == StateMachineEventResult.ResultType.ACCEPTED;
-        if (!accepted) {
-            throw new IllegalStateException("Guard blocked the transition for event: " + event);
+        MilestoneStatus after = sm.getState().getId();
+        if (after == before) {
+            throw new IllegalStateException(
+                    "Transition blocked for event " + event + ": milestone " + milestoneId + " stayed in " + before);
         }
     }
 
