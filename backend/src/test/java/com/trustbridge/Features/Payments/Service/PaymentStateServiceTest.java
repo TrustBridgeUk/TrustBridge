@@ -4,6 +4,8 @@ import com.trustbridge.Domain.Entities.PaymentRequest;
 import com.trustbridge.Domain.Enums.PaymentRequestEvent;
 import com.trustbridge.Domain.Enums.PaymentRequestStatus;
 import com.trustbridge.Domain.Repositories.PaymentRequestRepository;
+import com.trustbridge.Domain.Repositories.UserRepository;
+import com.trustbridge.Features.Payments.Provider.PaymentGateway;
 import com.trustbridge.Features.Payments.StateMachine.Interceptors.PaymentRequestChangeInterceptor;
 import com.trustbridge.Features.Payments.StateMachine.PaymentRequestStateMachineConfig;
 import org.junit.jupiter.api.AfterEach;
@@ -39,8 +41,7 @@ import static org.mockito.Mockito.when;
  *
  * Runs the real state machine and the real interceptor over an in-memory repository.
  *
- * Not covered here on purpose: the PAYMENT_SUCCESSFUL guard itself. It needs a provider check
- * (e.g. PaymentGateway.isPaid), which does not exist yet. Add it, then we write those tests.
+ * The guards themselves (provider check, expiry, actor) are tested in PaymentGuardsTest.
  */
 class PaymentStateServiceTest {
 
@@ -62,7 +63,14 @@ class PaymentStateServiceTest {
             return saved;
         });
 
-        context = new AnnotationConfigApplicationContext(PaymentRequestStateMachineConfig.class);
+        // The state machine config now needs these three beans for its guards.
+        context = new AnnotationConfigApplicationContext();
+        context.registerBean(PaymentRequestRepository.class, () -> repository);
+        context.registerBean(UserRepository.class, () -> mock(UserRepository.class));
+        context.registerBean(PaymentGateway.class, () -> mock(PaymentGateway.class));
+        context.register(PaymentRequestStateMachineConfig.class);
+        context.refresh();
+
         StateMachineFactory<PaymentRequestStatus, PaymentRequestEvent> factory =
                 context.getBean("PaymentRequestStateMachineFactory", StateMachineFactory.class);
 
@@ -82,7 +90,7 @@ class PaymentStateServiceTest {
         context.close();
     }
 
-    /** States with no PAYMENT_SUCCESSFUL transition. (PAID is left out: see the note in the PR.) */
+    /** States with no PAYMENT_SUCCESSFUL transition. */
     @ParameterizedTest
     @EnumSource(value = PaymentRequestStatus.class, names = {"FAILED", "EXPIRED", "CANCELLED", "REFUNDED"})
     void paymentSuccessful_onANonPayableRequest_throws_andLeavesStatusUnchanged(PaymentRequestStatus status) {
@@ -97,7 +105,8 @@ class PaymentStateServiceTest {
     void refund_onAPendingRequest_throws_andLeavesStatusUnchanged() {
         UUID id = requestIn(PaymentRequestStatus.PENDING);
 
-        assertThatThrownBy(() -> service.refundPayment(id)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> service.refundPayment(id, UUID.randomUUID()))
+                .isInstanceOf(IllegalStateException.class);
 
         assertThat(requests.get(id).getStatus()).isEqualTo(PaymentRequestStatus.PENDING);
     }
