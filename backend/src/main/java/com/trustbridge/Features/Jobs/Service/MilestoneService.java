@@ -14,6 +14,7 @@ import com.trustbridge.Features.Jobs.Dto.MilestoneSubmission.SubmissionFileDto;
 import com.trustbridge.Features.Jobs.Events.AllMilestonesCompletedEvent;
 import com.trustbridge.Features.Jobs.Events.UnlockNextMilestoneEvent;
 import com.trustbridge.Features.Notifications.Listeners.MilestoneEmailListener;
+import com.trustbridge.Features.Payments.Provider.Dto.PayoutResult;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -209,7 +210,7 @@ public class MilestoneService {
 
 
         milestoneStateService.workApproved(milestoneId);
-        milestoneStateService.releaseFunds(milestoneId);
+        milestoneStateService.releaseFundsByActor(milestoneId, milestones.getJob().getFreelancer().getId());
 
         Milestones paid = milestoneRepository.findById(milestoneId).orElseThrow();
         if (paid.getStatus() != MilestoneStatus.PAID_OUT) {

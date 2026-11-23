@@ -2,12 +2,11 @@ package com.trustbridge.Features.Payments.Provider.Stripe;
 
 import com.stripe.model.PaymentIntent;
 import com.stripe.model.Transfer;
+import com.trustbridge.Domain.Entities.BankPaymentSession;
 import com.trustbridge.Domain.Entities.Milestones;
 import com.trustbridge.Domain.Entities.PaymentRequest;
-import com.trustbridge.Domain.Entities.StripeAccount;
 import com.trustbridge.Domain.Entities.Users;
 import com.trustbridge.Domain.Repositories.BankPaymentSessionRepository;
-import com.trustbridge.Domain.Repositories.StripeAccountRepository;
 import com.trustbridge.Features.Payments.Provider.Dto.OnboardingResult;
 import com.trustbridge.Features.Payments.Provider.Dto.PayoutResult;
 import com.trustbridge.Features.Payments.Provider.Dto.ProviderPaymentStatus;
@@ -30,8 +29,7 @@ public class StripePaymentGateway implements PaymentGateway {
 
     private final StripePaymentService stripePaymentService;
     private final StripeConnectService stripeConnectService;
-    private final StripeAccountRepository stripeAccountRepository;
-    private BankPaymentSessionRepository bankPaymentSessionRepository;
+    private final BankPaymentSessionRepository bankPaymentSessionRepository;
 
 
     /**
@@ -42,7 +40,7 @@ public class StripePaymentGateway implements PaymentGateway {
     public ProviderPaymentStatus getPaymentStatus(PaymentRequest paymentRequest) {
         try {
             String paymentIntentId = bankPaymentSessionRepository.findByPaymentRequestId(paymentRequest.getId())
-                    .map(session -> session.getStripePiId())
+                    .map(BankPaymentSession::getStripePiId)
                     .orElse(null);
             if (paymentIntentId == null) return ProviderPaymentStatus.UNKNOWN;
 
