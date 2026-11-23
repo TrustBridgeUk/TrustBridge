@@ -30,7 +30,7 @@ public class JobCompletionListener {
         UUID jobId = event.getJobId();
 
         jobStateService.allMilestonesCompleted(jobId);
-        jobStateService.fireEvent(jobId, jobEvent.JOB_APPROVED, Map.of("isJobApproved", true));
-        jobStateService.fireEvent(jobId, jobEvent.RELEASE_PAYMENT, Map.of("isJobReleased", true));
+        jobStateService.jobApproved(jobId);
+        jobStateService.releasePayment(jobId);
     }
 }
