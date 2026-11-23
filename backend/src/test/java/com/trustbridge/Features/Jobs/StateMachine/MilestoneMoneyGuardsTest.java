@@ -148,6 +148,7 @@ class MilestoneMoneyGuardsTest {
         context.registerBean(EmailSenderService.class, () -> mock(EmailSenderService.class));
         context.registerBean(MilestoneEmailListener.class, () -> mock(MilestoneEmailListener.class));
         context.registerBean(PaymentGateway.class, () -> mock(PaymentGateway.class));
+        context.registerBean(DisputeRepository.class, () -> mock(DisputeRepository.class));
         context.register(MilestoneStateMachineConfig.class);
         context.refresh();
 
