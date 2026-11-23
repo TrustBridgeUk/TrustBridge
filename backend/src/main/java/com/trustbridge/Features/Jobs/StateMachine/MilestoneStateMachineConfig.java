@@ -1,15 +1,9 @@
 package com.trustbridge.Features.Jobs.StateMachine;
 
-import com.trustbridge.Domain.Entities.Milestones;
-import com.trustbridge.Domain.Entities.PaymentRequest;
-import com.trustbridge.Domain.Entities.Users;
-import com.trustbridge.Domain.Enums.EmailTemplateType;
-import com.trustbridge.Domain.Enums.JobStatus;
-import com.trustbridge.Domain.Enums.MilestoneStatus;
+import com.trustbridge.Domain.Entities.*;
+import com.trustbridge.Domain.Enums.*;
 import com.trustbridge.Domain.Enums.MilestoneEvent.milestoneEvent;
-import com.trustbridge.Domain.Repositories.MilestoneRepository;
-import com.trustbridge.Domain.Repositories.PaymentRequestRepository;
-import com.trustbridge.Domain.Repositories.UserRepository;
+import com.trustbridge.Domain.Repositories.*;
 import com.trustbridge.Features.Jobs.Events.AllMilestonesCompletedEvent;
 import com.trustbridge.Features.Jobs.Events.UnlockNextMilestoneEvent;
 import com.trustbridge.Features.Notifications.Listeners.MilestoneEmailListener;
@@ -18,10 +12,13 @@ import com.trustbridge.Features.Payments.Events.MilestoneSubmittedForApprovalEve
 import com.trustbridge.Features.Payments.Events.PaymentRequestCreatedEvent;
 import com.trustbridge.Features.Payments.Provider.PaymentGateway;
 import com.trustbridge.Features.Payments.Service.PaymentRequestService;
+import com.trustbridge.Security.Actor.GuardHeaders;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.statemachine.StateContext;
 import org.springframework.statemachine.action.Action;
 import org.springframework.statemachine.config.EnableStateMachineFactory;
 import org.springframework.statemachine.config.EnumStateMachineConfigurerAdapter;
@@ -30,14 +27,21 @@ import org.springframework.statemachine.config.builders.StateMachineTransitionCo
 import org.springframework.statemachine.guard.Guard;
 import org.springframework.util.Assert;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.OffsetDateTime;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 @Configuration
 @EnableStateMachineFactory(name = "MilestoneStateMachineFactory")
 @RequiredArgsConstructor
+@Slf4j
 public class MilestoneStateMachineConfig extends EnumStateMachineConfigurerAdapter<MilestoneStatus, milestoneEvent> {
 
     private final MilestoneRepository milestoneRepository;
@@ -48,6 +52,8 @@ public class MilestoneStateMachineConfig extends EnumStateMachineConfigurerAdapt
     private final PaymentGateway paymentGateway;
     private final PaymentRequestRepository paymentRequestRepository;
     private final ApplicationEventPublisher eventPublisher;
+    private final MilestoneSubmissionRepository milestoneSubmissionRepository;
+    private final DisputeRepository disputeRepository;
 
     /**
      * Configures the state machine states for the MilestoneStateMachineConfig.
@@ -162,6 +168,176 @@ public class MilestoneStateMachineConfig extends EnumStateMachineConfigurerAdapt
 
     String guardExecuted = "Guard executed: ";
     String milestoneIdName = "milestoneId";
+
+    /**
+     * FUNDS_DEPOSITED (AWAITING_PAYMENT -> IN_PROGRESS).
+     * Passes only when this milestone's payment request is PAID in the database.
+     */
+    @Bean
+    public Guard<MilestoneStatus, milestoneEvent> isFundedGuard() {
+        return context -> failClosed("isFundedGuard", () -> {
+            UUID milestoneId = context.getMessageHeaders().get(milestoneIdName, UUID.class);
+            return milestoneId != null && isPaymentRequestPaid(milestoneId);
+        });
+    }
+
+    /**
+     * RELEASE_FUNDS (APPROVED -> PAID_OUT).
+     * Passes only when BOTH are true:
+     *  1. this milestone's payment request is PAID (there is money in escrow to release), and
+     *  2. the actor is the client on this job: either the logged-in user is job.client, or the
+     *     review token matches the latest submission's token (the client's emailed link).
+     * The freelancer, a stranger, an unknown id or no identity at all is refused.
+     */
+    @Bean
+    public Guard<MilestoneStatus, milestoneEvent> isClientApprovingMilestoneGuard() {
+        return context -> failClosed("isClientApprovingMilestoneGuard", () -> {
+            UUID milestoneId = context.getMessageHeaders().get(milestoneIdName, UUID.class);
+            if (milestoneId == null) return false;
+
+            Milestones milestone = milestoneRepository.findById(milestoneId).orElse(null);
+            if (milestone == null) return false;
+
+            return isPaymentRequestPaid(milestoneId) && isClientOnJob(context, milestone);
+        });
+    }
+
+    /**
+     * Not wired to a transition yet. Checks the previous milestone (sequenceOrder - 1) in the
+     * database is PAID_OUT. The first milestone has no previous one, so it passes.
+     */
+    @Bean
+    public Guard<MilestoneStatus, milestoneEvent> isPreviousMilestoneApprovedGuard() {
+        return context -> failClosed("isPreviousMilestoneApprovedGuard", () -> {
+            UUID milestoneId = context.getMessageHeaders().get(milestoneIdName, UUID.class);
+            if (milestoneId == null) return false;
+
+            Milestones milestone = milestoneRepository.findById(milestoneId).orElse(null);
+            if (milestone == null || milestone.getSequenceOrder() == null) return false;
+            if (milestone.getSequenceOrder() <= 1) return true;
+
+            return milestoneRepository.findAllByJobId(milestone.getJob().getId()).stream()
+                    .filter(m -> m.getSequenceOrder() != null && m.getSequenceOrder() == milestone.getSequenceOrder() - 1)
+                    .findFirst()
+                    .map(previous -> previous.getStatus() == MilestoneStatus.PAID_OUT)
+                    .orElse(false);
+        });
+    }
+
+    /**
+     * RAISE_DISPUTE (SUBMITTED -> DISPUTED_NEGOTIATION).
+     * Passes when the actor is the client on this job (logged in as job.client, or a valid review
+     * token), or the logged-in user is an ADMIN. The role is read from the user row, not a header.
+     */
+    @Bean
+    public Guard<MilestoneStatus, milestoneEvent> onlyClientCanDisputeGuard() {
+        return context -> failClosed("onlyClientCanDisputeGuard", () -> {
+            UUID milestoneId = context.getMessageHeaders().get(milestoneIdName, UUID.class);
+            if (milestoneId == null) return false;
+
+            Milestones milestone = milestoneRepository.findById(milestoneId).orElse(null);
+            if (milestone == null) return false;
+
+            return isClientOnJob(context, milestone) || isAdmin(context);
+        });
+    }
+
+    /**
+     * RESOLVE_DISPUTE (DISPUTED_NEGOTIATION -> DISPUTE_RESOLVED).
+     * Passes when the dispute row says both sides agreed (RESOLVED_AGREEMENT), or the logged-in
+     * user is an ADMIN.
+     */
+    @Bean
+    public Guard<MilestoneStatus, milestoneEvent> mutualAgreementGuard() {
+        return context -> failClosed("mutualAgreementGuard", () -> {
+            UUID milestoneId = context.getMessageHeaders().get(milestoneIdName, UUID.class);
+            if (milestoneId == null) return false;
+
+            boolean agreed = disputeRepository.findByMilestoneId(milestoneId)
+                    .map(d -> d.getState() == DisputeState.RESOLVED_AGREEMENT)
+                    .orElse(false);
+
+            return agreed || isAdmin(context);
+        });
+    }
+
+    /**
+     * DISPUTE_TO_ARBITRATION (DISPUTED_NEGOTIATION -> DISPUTE_ARBITRATION).
+     * Passes when the dispute row was opened at least 3 days ago. The clock is the server's,
+     * not a "daysInNegotiation" number from the caller.
+     */
+    @Bean
+    public Guard<MilestoneStatus, milestoneEvent> escalationAllowedGuard() {
+        return context -> failClosed("escalationAllowedGuard", () -> {
+            UUID milestoneId = context.getMessageHeaders().get(milestoneIdName, UUID.class);
+            if (milestoneId == null) return false;
+
+            return disputeRepository.findByMilestoneId(milestoneId)
+                    .map(Dispute::getCreatedAt)
+                    .map(openedAt -> !openedAt.plusDays(ESCALATION_WAIT_DAYS).isAfter(OffsetDateTime.now(clock)))
+                    .orElse(false);
+        });
+    }
+
+    static final int ESCALATION_WAIT_DAYS = 3;
+
+    /** Server clock. A field so a test can swap it with ReflectionTestUtils. */
+    Clock clock = Clock.systemUTC();
+
+    private boolean isPaymentRequestPaid(UUID milestoneId) {
+        return paymentRequestRepository.findByMilestoneIdAndStatus(milestoneId, PaymentRequestStatus.PAID).isPresent();
+    }
+
+    /**
+     * True when the request proves it comes from this job's client:
+     *  - actorId is the job's client id (and that user exists), or
+     *  - reviewToken equals the latest submission's review token.
+     */
+    private boolean isClientOnJob(StateContext<MilestoneStatus, milestoneEvent> context, Milestones milestone) {
+        Users client = milestone.getJob() == null ? null : milestone.getJob().getClient();
+
+        UUID actorId = context.getMessageHeaders().get(GuardHeaders.ACTOR_ID, UUID.class);
+        if (actorId != null && client != null && client.getId() != null) {
+            boolean actorIsClient = userRepository.findById(actorId)
+                    .map(user -> user.getId().equals(client.getId()))
+                    .orElse(false);
+            if (actorIsClient) return true;
+        }
+
+        String reviewToken = context.getMessageHeaders().get(GuardHeaders.REVIEW_TOKEN, String.class);
+        if (reviewToken != null && !reviewToken.isBlank()) {
+            return milestoneSubmissionRepository.findTopByMilestoneIdOrderByCreatedAtDesc(milestone.getId())
+                    .map(MilestoneSubmissions::getReviewToken)
+                    .filter(Objects::nonNull)
+                    .map(expected -> MessageDigest.isEqual(
+                            expected.getBytes(StandardCharsets.UTF_8),
+                            reviewToken.getBytes(StandardCharsets.UTF_8)))
+                    .orElse(false);
+        }
+
+        return false;
+    }
+
+    private boolean isAdmin(StateContext<MilestoneStatus, milestoneEvent> context) {
+        UUID actorId = context.getMessageHeaders().get(GuardHeaders.ACTOR_ID, UUID.class);
+        if (actorId == null) return false;
+
+        return userRepository.findById(actorId)
+                .map(user -> user.getUserRole() == UserRole.role.ADMIN)
+                .orElse(false);
+    }
+
+    /** Runs a guard check. Any exception (bad header type, DB error) blocks the transition. */
+    private boolean failClosed(String guardName, Supplier<Boolean> check) {
+        try {
+            boolean allowed = Boolean.TRUE.equals(check.get());
+            log.info("{} {}: {}", guardExecuted, guardName, allowed ? "ALLOWED" : "BLOCKED");
+            return allowed;
+        } catch (RuntimeException e) {
+            log.warn("{} {}: BLOCKED (error: {})", guardExecuted, guardName, e.getMessage());
+            return false;
+        }
+    }
 
     /**
      * Executes the action to generate a payment request for a specific milestone.
@@ -321,132 +497,5 @@ public class MilestoneStateMachineConfig extends EnumStateMachineConfigurerAdapt
         return milestoneRepository.findFirstByJobIdOrderBySequenceOrderDesc(milestone.getJob().getId())
                 .map(lastMilestone -> lastMilestone.getId().equals(milestone.getId()))
                 .orElse(false);
-    }
-
-
-
-    /**
-     * Defines a guard condition that determines whether the "isFunded" condition is met
-     * based on the message headers of the context.
-     *
-     * This guard is used in state transitions to ensure that the milestone's funding
-     * status is validated before allowing certain transitions to proceed.
-     * The condition checks if the "isFunded" flag exists in the message headers and if
-     * its value is true.
-     *
-     * @return a {@link Guard} instance that evaluates the "isFunded" condition from
-     *         the state machine message headers.
-     */
-    @Bean
-    public Guard<MilestoneStatus, milestoneEvent> isFundedGuard() {
-        return context -> {
-            Boolean isFunded = (Boolean) context.getMessageHeaders().get("isFunded");
-            Logger.getLogger(getClass().getName()).info( guardExecuted + isFunded);
-            return isFunded != null && isFunded;
-        };
-    }
-
-    /**
-     * Defines a guard condition that checks whether the client is approving the milestone.
-     *
-     * This guard evaluates the "isClientApproving" flag from the message headers within
-     * the state machine context. If the flag exists and its value is true, the guard allows
-     * the transition to proceed; otherwise, the transition is blocked.
-     *
-     * Logs the execution of the guard along with the value of the "isClientApproving" flag.
-     *
-     * @return a {@link Guard} instance that evaluates the "isClientApproving" condition from
-     *         the state machine message headers.
-     */
-    @Bean
-    public Guard<MilestoneStatus, milestoneEvent> isClientApprovingMilestoneGuard() {
-        return context -> {
-            Boolean isClientApproving = (Boolean) context.getMessageHeaders().get("isClientApproving");
-            Logger.getLogger(getClass().getName()).info( guardExecuted + isClientApproving);
-            return isClientApproving != null && isClientApproving;
-        };
-    }
-
-    /**
-     * Defines a guard condition that determines whether the previous milestone has been approved.
-     *
-     * This guard evaluates the "isPreviousMilestoneApproved" flag from the message headers within
-     * the state machine context. If the flag exists and its value is true, the guard allows
-     * the transition to proceed. If the flag is absent or false, the transition is blocked.
-     *
-     * Logs the execution of the guard along with the value of the "isPreviousMilestoneApproved" flag.
-     *
-     * @return a {@link Guard} instance that evaluates the "isPreviousMilestoneApproved" condition
-     *         from the state machine message headers.
-     */
-    @Bean
-    public Guard<MilestoneStatus, milestoneEvent> isPreviousMilestoneApprovedGuard() {
-        return context -> {
-            Boolean isPreviousMilestoneApproved = (Boolean) context.getMessageHeaders().get("isPreviousMilestoneApproved");
-            Logger.getLogger(getClass().getName()).info(guardExecuted + isPreviousMilestoneApproved);
-            return isPreviousMilestoneApproved != null && isPreviousMilestoneApproved;
-        };
-    }
-
-    /**
-     * Defines a guard condition that determines whether only a client or an admin can raise a dispute.
-     *
-     * This guard evaluates the "userRole" value from the message headers within the state machine context.
-     * If the "userRole" equals "CLIENT" or "ADMIN", the guard allows the transition to proceed.
-     * Otherwise, the transition is blocked.
-     *
-     * @return a {@link Guard} instance that validates if the user raising the dispute is either a client or an admin.
-     */
-    @Bean
-    public Guard<MilestoneStatus, milestoneEvent> onlyClientCanDisputeGuard() {
-        return context -> {
-            String userRole = context.getMessageHeaders().get("userRole", String.class);
-            return "CLIENT".equals(userRole) || "ADMIN".equals(userRole);
-        };
-    }
-
-    /**
-     * Defines a guard condition that verifies whether a transition can occur based on
-     * mutual agreement between parties or administrative privileges.
-     *
-     * This guard evaluates the "bothPartiesAgreed" and "userRole" values from the
-     * message headers within the state machine context. The conditions for allowing
-     * the transition are as follows:
-     * - If "bothPartiesAgreed" exists and is true, the transition is permitted.
-     * - If "userRole" equals "ADMIN", the transition is also permitted.
-     *
-     * This guard ensures flexibility for transitions by allowing consensual agreements
-     * or administrative overrides.
-     *
-     * @return a {@link Guard} instance that determines whether the mutual agreement
-     *         or administrative force conditions are satisfied.
-     */
-    @Bean
-    public Guard<MilestoneStatus, milestoneEvent> mutualAgreementGuard() {
-        return context -> {
-            Boolean bothPartiesAgreed = context.getMessageHeaders().get("bothPartiesAgreed", Boolean.class);
-            String userRole = context.getMessageHeaders().get("userRole", String.class);
-
-            // Allowed if both agreed, OR if an admin forces the resolution
-            return (bothPartiesAgreed != null && bothPartiesAgreed) || "ADMIN".equals(userRole);
-        };
-    }
-
-    /**
-     * Creates and returns a guard that determines whether an escalation is allowed
-     * based on the number of days in negotiation.
-     *
-     * The guard checks the "daysInNegotiation" header from the message context.
-     * If the number of days is at least 3, escalation is allowed. Otherwise, it is blocked.
-     *
-     * @return a guard that evaluates if the escalation criteria are met
-     */
-    @Bean
-    public Guard<MilestoneStatus, milestoneEvent> escalationAllowedGuard() {
-        return context -> {
-            Integer daysInNegotiation = context.getMessageHeaders().get("daysInNegotiation", Integer.class);
-
-            return daysInNegotiation != null && daysInNegotiation >= 3;
-        };
     }
 }
