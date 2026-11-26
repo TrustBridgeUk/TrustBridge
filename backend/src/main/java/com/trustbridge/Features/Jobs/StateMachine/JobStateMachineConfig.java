@@ -22,6 +22,8 @@ import org.springframework.statemachine.config.builders.StateMachineStateConfigu
 import org.springframework.statemachine.config.builders.StateMachineTransitionConfigurer;
 import org.springframework.statemachine.guard.Guard;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.UUID;
@@ -143,7 +145,7 @@ public class JobStateMachineConfig extends EnumStateMachineConfigurerAdapter<job
      */
     @Bean
     public Guard<jobStatus, jobEvent> isClientApprovingGuard() {
-        return context -> {
+        return context -> failClosed("isClientApprovingGuard", () -> {
             UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
             String providedToken = context.getMessageHeaders().get("inviteToken", String.class);
 
@@ -152,20 +154,21 @@ public class JobStateMachineConfig extends EnumStateMachineConfigurerAdapter<job
             }
 
             Jobs job = jobRepository.findById(jobId).orElse(null);
-
-            if (job == null) {
+            if (job == null || job.getInviteToken() == null) {
                 return false;
             }
 
-            // 3. ZERO-TRUST CHECK: Does the provided token exactly match the database token?
-            boolean isAuthorized = providedToken.equals(job.getInviteToken());
+            // Constant-time compare against the token stored on the job.
+            boolean isAuthorized = MessageDigest.isEqual(
+                    job.getInviteToken().getBytes(StandardCharsets.UTF_8),
+                    providedToken.getBytes(StandardCharsets.UTF_8));
 
             if (!isAuthorized) {
-                System.out.println("🚨 SECURITY ALERT: Invalid token used attempting to release funds on Job " + jobId);
+                log.warn("SECURITY: invalid invite token used to accept job {}", jobId);
             }
 
             return isAuthorized;
-        };
+        });
     }
 
     /**
@@ -220,20 +223,19 @@ public class JobStateMachineConfig extends EnumStateMachineConfigurerAdapter<job
      */
     @Bean
     public Guard<jobStatus, jobEvent> allMilestonesCompleted() {
-        return context -> {
+        return context -> failClosed("allMilestonesCompleted", () -> {
             UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
             if (jobId == null) return false;
 
-            // Zero-Trust Check: Does the database contain ANY milestones for this job
-            // that are NOT in a finished state?
-            boolean hasUnfinishedWork = milestoneRepository.existsByJobIdAndStatusNotIn(
+            // A job with no milestones has nothing completed.
+            if (milestoneRepository.findAllByJobId(jobId).isEmpty()) return false;
+
+            // Passes only if the database has no unfinished milestone for this job.
+            return !milestoneRepository.existsByJobIdAndStatusNotIn(
                     jobId,
                     List.of(MilestoneStatus.PAID_OUT, MilestoneStatus.CANCELLED)
             );
-
-            // If there is NO unfinished work, the guard passes (returns true)
-            return !hasUnfinishedWork;
-        };
+        });
     }
 
     /**

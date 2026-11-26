@@ -1,6 +1,8 @@
 package com.trustbridge.Features.Jobs.StateMachine;
 
+import com.trustbridge.Domain.Entities.Dispute;
 import com.trustbridge.Domain.Entities.Jobs;
+import com.trustbridge.Domain.Enums.DisputeState;
 import com.trustbridge.Domain.Entities.MilestoneSubmissions;
 import com.trustbridge.Domain.Entities.Milestones;
 import com.trustbridge.Domain.Entities.PaymentRequest;
@@ -36,6 +38,10 @@ import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -80,6 +86,8 @@ class MilestoneMoneyGuardsTest {
     private PaymentRequest paymentRequest;
     private boolean paymentRequestExists;
     private MilestoneStateService stateService;
+    private Users admin;
+    private Dispute dispute;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -148,7 +156,13 @@ class MilestoneMoneyGuardsTest {
         context.registerBean(EmailSenderService.class, () -> mock(EmailSenderService.class));
         context.registerBean(MilestoneEmailListener.class, () -> mock(MilestoneEmailListener.class));
         context.registerBean(PaymentGateway.class, () -> mock(PaymentGateway.class));
-        context.registerBean(DisputeRepository.class, () -> mock(DisputeRepository.class));
+        dispute = null;
+        DisputeRepository disputeRepository = mock(DisputeRepository.class);
+        when(disputeRepository.findByMilestoneId(milestone.getId())).thenAnswer(inv -> Optional.ofNullable(dispute));
+        admin = user(UserRole.role.ADMIN);
+        when(userRepository.findById(admin.getId())).thenReturn(Optional.of(admin));
+
+        context.registerBean(DisputeRepository.class, () -> disputeRepository);
         context.register(MilestoneStateMachineConfig.class);
         context.refresh();
 
@@ -294,6 +308,104 @@ class MilestoneMoneyGuardsTest {
     }
 
     // ------------------------------------------------------------------
+    // RAISE_DISPUTE  (SUBMITTED -> DISPUTED_NEGOTIATION)
+    // ------------------------------------------------------------------
+
+    @Test
+    void raiseDispute_forgedClientRole_isBlocked() {
+        Outcome result = send(MilestoneStatus.SUBMITTED, milestoneEvent.RAISE_DISPUTE,
+                Map.of("role", "CLIENT", "isJobDisputed", true));
+
+        assertBlocked(result);
+    }
+
+    @Test
+    void raiseDispute_byFreelancer_isBlocked() {
+        assertBlocked(send(MilestoneStatus.SUBMITTED, milestoneEvent.RAISE_DISPUTE, Map.of(ACTOR_ID, freelancer.getId())));
+    }
+
+    @Test
+    void raiseDispute_byStranger_isBlocked() {
+        assertBlocked(send(MilestoneStatus.SUBMITTED, milestoneEvent.RAISE_DISPUTE, Map.of(ACTOR_ID, stranger.getId())));
+    }
+
+    @Test
+    void raiseDispute_withWrongReviewToken_isBlocked() {
+        assertBlocked(send(MilestoneStatus.SUBMITTED, milestoneEvent.RAISE_DISPUTE, Map.of(REVIEW_TOKEN_HEADER, "guessed-token")));
+    }
+
+    @Test
+    void raiseDispute_byClientWithValidReviewToken_isAllowed() {
+        assertAllowed(send(MilestoneStatus.SUBMITTED, milestoneEvent.RAISE_DISPUTE, Map.of(REVIEW_TOKEN_HEADER, REVIEW_TOKEN)));
+    }
+
+    @Test
+    void raiseDispute_byLoggedInClient_isAllowed() {
+        assertAllowed(send(MilestoneStatus.SUBMITTED, milestoneEvent.RAISE_DISPUTE, Map.of(ACTOR_ID, client.getId())));
+    }
+
+    // ------------------------------------------------------------------
+    // RESOLVE_DISPUTE  (DISPUTED_NEGOTIATION -> DISPUTE_RESOLVED)
+    // ------------------------------------------------------------------
+
+    @Test
+    void resolveDispute_forgedAgreementFlag_isBlocked_whenDisputeNotAgreed() {
+        givenDispute(DisputeState.AWAITING_EVIDENCE, OffsetDateTime.now());
+
+        assertBlocked(send(MilestoneStatus.DISPUTED_NEGOTIATION, milestoneEvent.RESOLVE_DISPUTE,
+                Map.of("isMutualAgreement", true, ACTOR_ID, client.getId())));
+    }
+
+    @Test
+    void resolveDispute_isBlocked_whenNoDisputeExists() {
+        assertBlocked(send(MilestoneStatus.DISPUTED_NEGOTIATION, milestoneEvent.RESOLVE_DISPUTE, Map.of(ACTOR_ID, client.getId())));
+    }
+
+    @Test
+    void resolveDispute_isAllowed_whenDisputeRowIsAgreed() {
+        givenDispute(DisputeState.RESOLVED_AGREEMENT, OffsetDateTime.now());
+
+        assertAllowed(send(MilestoneStatus.DISPUTED_NEGOTIATION, milestoneEvent.RESOLVE_DISPUTE, Map.of()));
+    }
+
+    @Test
+    void resolveDispute_isAllowed_forAdmin() {
+        givenDispute(DisputeState.AWAITING_EVIDENCE, OffsetDateTime.now());
+
+        assertAllowed(send(MilestoneStatus.DISPUTED_NEGOTIATION, milestoneEvent.RESOLVE_DISPUTE, Map.of(ACTOR_ID, admin.getId())));
+    }
+
+    // ------------------------------------------------------------------
+    // DISPUTE_TO_ARBITRATION  (DISPUTED_NEGOTIATION -> DISPUTE_ARBITRATION)
+    // ------------------------------------------------------------------
+
+    private static final Instant NOW = Instant.parse("2026-11-26T12:00:00Z");
+
+    @Test
+    void escalate_forgedDaysFlag_isBlocked_beforeThreeDays() {
+        fixClock();
+        givenDispute(DisputeState.AWAITING_EVIDENCE, OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC).minusDays(2));
+
+        assertBlocked(send(MilestoneStatus.DISPUTED_NEGOTIATION, milestoneEvent.DISPUTE_TO_ARBITRATION,
+                Map.of("daysInNegotiation", 30)));
+    }
+
+    @Test
+    void escalate_isBlocked_whenNoDisputeExists() {
+        fixClock();
+
+        assertBlocked(send(MilestoneStatus.DISPUTED_NEGOTIATION, milestoneEvent.DISPUTE_TO_ARBITRATION, Map.of()));
+    }
+
+    @Test
+    void escalate_isAllowed_afterThreeDays() {
+        fixClock();
+        givenDispute(DisputeState.AWAITING_EVIDENCE, OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC).minusDays(3));
+
+        assertAllowed(send(MilestoneStatus.DISPUTED_NEGOTIATION, milestoneEvent.DISPUTE_TO_ARBITRATION, Map.of()));
+    }
+
+    // ------------------------------------------------------------------
     // MilestoneStateService.fireEvent must NOT report success when a guard says no
     // ------------------------------------------------------------------
 
@@ -338,6 +450,17 @@ class MilestoneMoneyGuardsTest {
 
     private Outcome release(Map<String, Object> headers) {
         return send(MilestoneStatus.APPROVED, milestoneEvent.RELEASE_FUNDS, headers);
+    }
+
+    private void givenDispute(DisputeState state, OffsetDateTime openedAt) {
+        dispute = Dispute.builder().milestone(milestone).state(state).build();
+        dispute.setId(UUID.randomUUID());
+        dispute.setCreatedAt(openedAt);
+    }
+
+    private void fixClock() {
+        ReflectionTestUtils.setField(context.getBean(MilestoneStateMachineConfig.class), "clock",
+                Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private void givenPaymentRequest(PaymentRequestStatus status) {

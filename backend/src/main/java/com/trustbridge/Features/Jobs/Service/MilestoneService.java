@@ -210,7 +210,8 @@ public class MilestoneService {
 
 
         milestoneStateService.workApproved(milestoneId);
-        milestoneStateService.releaseFundsByActor(milestoneId, milestones.getJob().getFreelancer().getId());
+        // The client approves via their emailed review link, so the guard verifies the token itself.
+        milestoneStateService.releaseFundsByReviewToken(milestoneId, providedToken);
 
         Milestones paid = milestoneRepository.findById(milestoneId).orElseThrow();
         if (paid.getStatus() != MilestoneStatus.PAID_OUT) {
