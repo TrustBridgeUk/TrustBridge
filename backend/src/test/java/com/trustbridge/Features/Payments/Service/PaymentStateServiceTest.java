@@ -52,7 +52,6 @@ class PaymentStateServiceTest {
     private ApplicationEventPublisher eventPublisher;
 
     @BeforeEach
-    @SuppressWarnings("unchecked")
     void setUp() {
         PaymentRequestRepository repository = mock(PaymentRequestRepository.class);
         when(repository.findById(any(UUID.class))).thenAnswer(inv ->
