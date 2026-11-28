@@ -1,23 +1,19 @@
 package com.trustbridge.Features.Jobs.Service;
 
 import com.trustbridge.Domain.Entities.Dispute;
-import com.trustbridge.Domain.Entities.Jobs;
 import com.trustbridge.Domain.Entities.Milestones;
 import com.trustbridge.Domain.Enums.MilestoneStatus;
-import com.trustbridge.Domain.Enums.UserRole;
 import com.trustbridge.Domain.Repositories.DisputeRepository;
 import com.trustbridge.Domain.Repositories.JobRepository;
 import com.trustbridge.Domain.Repositories.MilestoneRepository;
 import com.trustbridge.Features.Jobs.StateMachine.Interceptors.MilestoneStateChangeInterceptor;
+import com.trustbridge.Security.Actor.GuardHeaders;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.statemachine.StateMachine;
-import org.springframework.statemachine.StateMachineEventResult;
 import org.springframework.statemachine.config.StateMachineFactory;
 import org.springframework.statemachine.support.DefaultStateMachineContext;
 import org.springframework.stereotype.Service;
@@ -75,6 +71,32 @@ public class MilestoneStateService {
     }
 
     /**
+     * Fires an event for a specified milestone by leveraging the associated state machine.
+     * The event is sent to the state machine to trigger a state transition for the milestone.
+     *
+     * @param milestoneId The unique identifier of the milestone for which the event should be fired.
+     * @param event       The specific event to be fired, which may trigger a state transition in the state machine.
+     */
+    public void fireEvent(UUID milestoneId, milestoneEvent event, Map<String, Object> extraHeaders) {
+        StateMachine<MilestoneStatus, milestoneEvent> sm = buildStateMachine(milestoneId);
+        MilestoneStatus before = sm.getState().getId();
+
+        MessageBuilder<milestoneEvent> builder = MessageBuilder
+                .withPayload(event)
+                .setHeader("milestoneId", milestoneId);
+
+        extraHeaders.forEach(builder::setHeader);
+
+        sm.sendEvent(Mono.just(builder.build())).blockLast();
+
+        MilestoneStatus after = sm.getState().getId();
+        if (after == before) {
+            throw new IllegalStateException(
+                    "Transition blocked for event " + event + ": milestone " + milestoneId + " stayed in " + before);
+        }
+    }
+
+    /**
      * Activates the next locked milestone for a specified job by changing its state
      * to unlocked. If no locked milestones exist for the given job, no changes are made.
      *
@@ -116,38 +138,22 @@ public class MilestoneStateService {
         }
     }
 
+    /**
+     * Moves a milestone into dispute on behalf of the client.
+     *
+     * @param reviewToken the client's review token from the request (X-Review-Token). The
+     *                    RAISE_DISPUTE guard checks it against the latest submission.
+     */
     @Transactional
-    public void moveMilestoneIntoDispute(UUID milestoneId) {
+    public void moveMilestoneIntoDispute(UUID milestoneId, String reviewToken) {
         Dispute dispute = disputeRepository.findByMilestoneId(milestoneId)
                 .orElseThrow(() -> new RuntimeException("Dispute not found!"));
 
-        this.disputeRaised(milestoneId, "CLIENT");
+        this.disputeRaisedByReviewToken(milestoneId, reviewToken);
         log.info("Milestone {} moved into DISPUTE state", milestoneId);
     }
 
-    /**
-     * Fires an event for a specified milestone by leveraging the associated state machine.
-     * The event is sent to the state machine to trigger a state transition for the milestone.
-     *
-     * @param milestoneId The unique identifier of the milestone for which the event should be fired.
-     * @param event       The specific event to be fired, which may trigger a state transition in the state machine.
-     */
-    public void fireEvent(UUID milestoneId, milestoneEvent event, Map<String, Object> extraHeaders) {
-        StateMachine<MilestoneStatus, milestoneEvent> sm = buildStateMachine(milestoneId);
 
-        MessageBuilder<milestoneEvent> builder = MessageBuilder
-                .withPayload(event)
-                .setHeader("milestoneId", milestoneId);
-
-        extraHeaders.forEach(builder::setHeader);
-
-        var result = sm.sendEvent(Mono.just(builder.build())).blockLast();
-
-        boolean accepted = result != null && result.getResultType() == StateMachineEventResult.ResultType.ACCEPTED;
-        if (!accepted) {
-            throw new IllegalStateException("Guard blocked the transition for event: " + event);
-        }
-    }
 
     /**
      * Activates a milestone by triggering the UNLOCK event through its associated state machine.
@@ -208,26 +214,39 @@ public class MilestoneStateService {
      * @param milestoneId The unique identifier of the milestone for which the "Funds Deposited" event is triggered.
      */
     public void fundsDeposited(UUID milestoneId) {
-        fireEvent(milestoneId, milestoneEvent.FUNDS_DEPOSITED, Map.of("isClientApproving", true));
+        fireEvent(milestoneId, milestoneEvent.FUNDS_DEPOSITED, Map.of());
     }
 
     /**
-     * Releases the funds associated with the specified milestone.
-     *
-     * @param milestoneId the unique identifier of the milestone for which funds
-     *                    should be released
+     * Releases escrow for a milestone when the client approves through their emailed review link.
+     * The guard checks the token against the latest submission and that the payment is PAID.
      */
-    public void releaseFunds(UUID milestoneId) {
-        fireEvent(milestoneId, milestoneEvent.RELEASE_FUNDS, Map.of("isClientApproving", true));
+    public void releaseFundsByReviewToken(UUID milestoneId, String reviewToken) {
+        fireEvent(milestoneId, milestoneEvent.RELEASE_FUNDS, identityHeader(GuardHeaders.REVIEW_TOKEN, reviewToken));
     }
 
     /**
-     * Handles the event when a dispute is raised for a specific milestone.
+     * Releases escrow for a milestone when a logged-in user approves.
+     * The guard checks the actor is the client on this job and that the payment is PAID.
      *
-     * @param milestoneId the unique identifier of the milestone for which the dispute is raised
+     * @param actorId from CurrentActorResolver, i.e. the authenticated request
      */
-    public void disputeRaised(UUID milestoneId, String userRole) {
-        fireEvent(milestoneId, milestoneEvent.RAISE_DISPUTE, Map.of("userRole", userRole));
+    public void releaseFundsByActor(UUID milestoneId, UUID actorId) {
+        fireEvent(milestoneId, milestoneEvent.RELEASE_FUNDS, identityHeader(GuardHeaders.ACTOR_ID, actorId));
+    }
+
+    /** Client raises a dispute through their emailed review link. */
+    public void disputeRaisedByReviewToken(UUID milestoneId, String reviewToken) {
+        fireEvent(milestoneId, milestoneEvent.RAISE_DISPUTE, identityHeader(GuardHeaders.REVIEW_TOKEN, reviewToken));
+    }
+
+    /** A logged-in client (or admin) raises a dispute. */
+    public void disputeRaisedByActor(UUID milestoneId, UUID actorId) {
+        fireEvent(milestoneId, milestoneEvent.RAISE_DISPUTE, identityHeader(GuardHeaders.ACTOR_ID, actorId));
+    }
+
+    private static Map<String, Object> identityHeader(String name, Object value) {
+        return value == null ? Map.of() : Map.of(name, value);
     }
 
     /**
@@ -235,8 +254,9 @@ public class MilestoneStateService {
      *
      * @param milestoneId the unique identifier of the milestone for which the dispute is resolved
      */
-    public void disputeResolved(UUID milestoneId) {
-        fireEvent(milestoneId, milestoneEvent.RESOLVE_DISPUTE, Map.of());
+    /** Map.of throws on null, so a missing identity becomes "no header", which the guard refuses. */
+    public void disputeResolved(UUID milestoneId, UUID actorId) {
+        fireEvent(milestoneId, milestoneEvent.RESOLVE_DISPUTE, identityHeader(GuardHeaders.ACTOR_ID, actorId));
     }
 
     /**

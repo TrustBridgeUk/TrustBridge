@@ -1,10 +1,8 @@
 package com.trustbridge.Features.Jobs.Service;
 
-import com.trustbridge.Domain.Entities.Dispute;
 import com.trustbridge.Domain.Entities.Jobs;
 import com.trustbridge.Domain.Entities.Milestones;
 import com.trustbridge.Domain.Enums.MilestoneStatus;
-import com.trustbridge.Domain.Repositories.DisputeRepository;
 import com.trustbridge.Domain.Repositories.JobRepository;
 import com.trustbridge.Domain.Enums.JobStatus.*;
 import com.trustbridge.Domain.Enums.JobEvent.*;
@@ -13,11 +11,8 @@ import com.trustbridge.Features.Jobs.StateMachine.Interceptors.JobStateChangeInt
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.statemachine.StateMachine;
-import org.springframework.statemachine.StateMachineEventResult;
 import org.springframework.statemachine.config.StateMachineFactory;
 import org.springframework.statemachine.support.DefaultStateMachineContext;
 import org.springframework.stereotype.Service;
@@ -34,31 +29,16 @@ public class JobStateService {
     private final JobRepository jobRepository;
     private final MilestoneRepository milestoneRepository;
 
-    @Autowired
     StateMachineFactory<jobStatus, jobEvent> stateMachineFactory;
 
-    @Autowired
     JobStateChangeInterceptor jobInterceptor;
 
 
-    @Transactional
-    public void moveJobintoDispute(UUID jobId, UUID milestoneId) {
-        Milestones milestone = milestoneRepository.findById(milestoneId)
-                .orElseThrow(() -> new RuntimeException("milestone not found!"));
-
-        if (milestone.getJob().getId().equals(jobId) && milestone.getStatus().equals(MilestoneStatus.DISPUTED_NEGOTIATION)) {
-            this.raiseDispute(jobId);
-            log.info("Job {} moved into DISPUTE state", jobId);
-        } else {
-            throw new IllegalStateException("Milestone " + milestoneId + " is not in a disputable state for job " + jobId);
-        }
-    }
-
     /**
-     * Builds and initializes a state machine for the specified job.
+     * Builds and initialises a state machine for the specified job.
      *
      * @param jobId the unique identifier of the job for which the state machine is being built
-     * @return the initialized state machine for managing the job's state transitions
+     * @return the initialised state machine for managing the job's state transitions
      * @throws RuntimeException if the job with the provided ID is not found
      */
     private StateMachine<jobStatus, jobEvent>  buildStateMachine(UUID jobId) {
@@ -84,52 +64,39 @@ public class JobStateService {
         return sm;
     }
 
-    /**
-     * Triggers a state transition event for the specified job using the state machine.
-     * The method validates and sends an event to update the state of the job.
-     *
-     * @param jobId the unique identifier of the job for which the event is being triggered
-     * @param event the state transition event to be triggered
-     * @param additionalHeaders a map of additional headers to be dynamically injected into the event message,
-     *                          can be null if no extra headers are required
-     * @throws IllegalStateException if the event transition is not accepted by the state machine
-     */
     public void fireEvent(UUID jobId, jobEvent event, Map<String, Object> additionalHeaders) {
         StateMachine<jobStatus, jobEvent> sm = buildStateMachine(jobId);
+        jobStatus before = sm.getState().getId();
 
         MessageBuilder<jobEvent> builder = MessageBuilder
                 .withPayload(event)
                 .setHeader("jobId", jobId);
 
         if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
-            additionalHeaders.forEach((key, value) -> builder.setHeader(key, value));
+            additionalHeaders.forEach(builder::setHeader);
         }
 
-        var result = sm.sendEvent(Mono.just(builder.build())).blockLast();
+        sm.sendEvent(Mono.just(builder.build())).blockLast();
 
-        if (result != null) {
-            log.info("====== STATE MACHINE RESULT ======");
-            log.info("Result Type: " + result.getResultType());
-        }
-
-        boolean accepted = result != null && result.getResultType() == StateMachineEventResult.ResultType.ACCEPTED;
-
-        if (!accepted) {
-            String reason = result != null ? result.getResultType().toString() : "NULL_RESULT";
-            throw new IllegalStateException("Transition failed with reason: " + reason + " for event: " + event);
+        // Spring State Machine reports ACCEPTED even when a guard says no, so judge by the state.
+        jobStatus after = sm.getState().getId();
+        if (after == before) {
+            throw new IllegalStateException(
+                    "Transition blocked for event " + event + ": job " + jobId + " stayed in " + before);
         }
     }
 
-    /**
-     * Triggers a state transition event for the specified job using the state machine.
-     * This method serves as a convenience wrapper to fire an event without additional headers.
-     *
-     * @param jobId the unique identifier of the job for which the event is being triggered
-     * @param event the state transition event to be triggered
-     * @throws IllegalStateException if the event transition is not accepted by the state machine
-     */
-    public void fireEvent(UUID jobId, jobEvent event) {
-        this.fireEvent(jobId, event, null);
+    @Transactional
+    public void moveJobintoDispute(UUID jobId, UUID milestoneId) {
+        Milestones milestone = milestoneRepository.findById(milestoneId)
+                .orElseThrow(() -> new RuntimeException("milestone not found!"));
+
+        if (milestone.getJob().getId().equals(jobId) && milestone.getStatus().equals(MilestoneStatus.DISPUTED_NEGOTIATION)) {
+            this.raiseDispute(jobId);
+            log.info("Job {} moved into DISPUTE state", jobId);
+        } else {
+            throw new IllegalStateException("Milestone " + milestoneId + " is not in a disputable state for job " + jobId);
+        }
     }
 
     /**
@@ -139,7 +106,7 @@ public class JobStateService {
      * @throws IllegalStateException if the state transition is not accepted by the state machine
      */
     public void draftToPending(UUID jobId) {
-        fireEvent(jobId, jobEvent.PUBLISH_OFFER);
+        fireEvent(jobId, jobEvent.PUBLISH_OFFER, null);
     }
 
     /**
@@ -148,7 +115,7 @@ public class JobStateService {
      * @param jobId the unique identifier of the job to be transitioned to the "Cancelled" state
      */
     public void draftToCancelled(UUID jobId) {
-        fireEvent(jobId, jobEvent.CANCEL_JOB);
+        fireEvent(jobId, jobEvent.CANCEL_JOB, null);
     }
 
     /**
@@ -158,7 +125,7 @@ public class JobStateService {
      * @param jobId the unique identifier of the job to be transitioned to the cancelled state
      */
     public void pendingToCancelled(UUID jobId) {
-        fireEvent(jobId, jobEvent.CANCEL_JOB);
+        fireEvent(jobId, jobEvent.CANCEL_JOB, null);
     }
 
     /**
@@ -179,7 +146,7 @@ public class JobStateService {
      * @param jobId the unique identifier of the job for which the submission is being revoked
      */
     public void submissionRevoked(UUID jobId) {
-        fireEvent(jobId, jobEvent.SUBMISSION_REVOKED);
+        fireEvent(jobId, jobEvent.SUBMISSION_REVOKED, null);
     }
 
     /**
@@ -190,7 +157,7 @@ public class JobStateService {
      * @throws IllegalStateException if the state transition is not accepted by the state machine
      */
     public void offerAccepted(UUID jobId) {
-        fireEvent(jobId, jobEvent.ACCEPT_OFFER);
+        fireEvent(jobId, jobEvent.ACCEPT_OFFER, null);
     }
 
     /**
@@ -201,7 +168,7 @@ public class JobStateService {
      * @throws IllegalStateException if the state transition is not accepted by the state machine
      */
     public void fundsDeposited(UUID jobId) {
-        fireEvent(jobId, jobEvent.FUNDS_DEPOSITED);
+        fireEvent(jobId, jobEvent.FUNDS_DEPOSITED, null);
     }
 
     /**
@@ -211,7 +178,7 @@ public class JobStateService {
      * @throws IllegalStateException if the state transition is not accepted by the state machine
      */
     public void allMilestonesCompleted(UUID jobId) {
-        fireEvent(jobId, jobEvent.ALL_MILESTONES_COMPLETED);
+        fireEvent(jobId, jobEvent.ALL_MILESTONES_COMPLETED, null);
     }
 
     /**
@@ -221,7 +188,7 @@ public class JobStateService {
      * @throws IllegalStateException if the state transition is not accepted by the state machine
      */
     public void jobApproved(UUID jobId) {
-        fireEvent(jobId, jobEvent.JOB_APPROVED);
+        fireEvent(jobId, jobEvent.JOB_APPROVED, null);
     }
 
     /**
@@ -231,7 +198,7 @@ public class JobStateService {
      * @throws IllegalStateException if the state transition is not accepted by the state machine
      */
     public void releasePayment(UUID jobId) {
-        fireEvent(jobId, jobEvent.RELEASE_PAYMENT);
+        fireEvent(jobId, jobEvent.RELEASE_PAYMENT, null);
     }
 
     /**
@@ -241,7 +208,7 @@ public class JobStateService {
      * @throws IllegalStateException if the state transition is not accepted by the state machine
      */
     public void raiseDispute(UUID jobId) {
-        fireEvent(jobId, jobEvent.RAISE_DISPUTE, Map.of("isJobDisputed", true));
+        fireEvent(jobId, jobEvent.RAISE_DISPUTE, null);
     }
 
     /**
@@ -251,6 +218,6 @@ public class JobStateService {
      * @throws IllegalStateException if the state transition is not accepted by the state machine
      */
     public void resolveDispute(UUID jobId) {
-        fireEvent(jobId, jobEvent.RESOLVE_DISPUTE);
+        fireEvent(jobId, jobEvent.RESOLVE_DISPUTE, null);
     }
 }

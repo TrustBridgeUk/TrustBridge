@@ -95,7 +95,7 @@ public class DisputeService {
 
         storeEvidenceFiles(submission, files);
 
-        milestoneStateService.moveMilestoneIntoDispute(milestone.getId());
+        milestoneStateService.moveMilestoneIntoDispute(milestone.getId(), reviewToken);
         jobStateService.moveJobintoDispute(milestone.getJob().getId(), milestone.getId());
 
         disputeStateService.disputeEvidenceSubmitted(dispute.getId());

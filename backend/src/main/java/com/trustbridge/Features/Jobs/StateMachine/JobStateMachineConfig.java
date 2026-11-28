@@ -5,10 +5,11 @@ import com.trustbridge.Domain.Entities.Milestones;
 import com.trustbridge.Domain.Enums.JobEvent.*;
 import com.trustbridge.Domain.Enums.JobStatus.*;
 import com.trustbridge.Domain.Enums.MilestoneStatus;
+import com.trustbridge.Domain.Enums.PaymentRequestStatus;
 import com.trustbridge.Domain.Repositories.JobRepository;
 import com.trustbridge.Domain.Repositories.MilestoneRepository;
+import com.trustbridge.Domain.Repositories.PaymentRequestRepository;
 import com.trustbridge.Features.Jobs.Events.UnlockNextMilestoneEvent;
-import com.trustbridge.Features.Jobs.Service.MilestoneStateService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
@@ -21,10 +22,12 @@ import org.springframework.statemachine.config.builders.StateMachineStateConfigu
 import org.springframework.statemachine.config.builders.StateMachineTransitionConfigurer;
 import org.springframework.statemachine.guard.Guard;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.EnumSet;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 @Slf4j
 @Configuration
@@ -35,6 +38,7 @@ public class JobStateMachineConfig extends EnumStateMachineConfigurerAdapter<job
     final private JobRepository jobRepository;
     final private MilestoneRepository milestoneRepository;
     final private ApplicationEventPublisher eventPublisher;
+    private final PaymentRequestRepository paymentRequestRepository;
 
     /**
      * Configures the state machine with the initial state and all possible job states.
@@ -133,40 +137,38 @@ public class JobStateMachineConfig extends EnumStateMachineConfigurerAdapter<job
      * Guard implementation that checks whether a client is authorized to approve a job
      * by validating the provided invite token against the expected token stored in the database.
      * This method follows a zero-trust policy to ensure only the correct token allows progression.
-     *
      * The guard retrieves the `jobId` and `inviteToken` from the context's message headers,
      * fetches the associated job from the database using the `jobId`, and compares the provided
      * token with the job's stored token. If any validation fails, the guard blocks progress.
-     *
      * @return a Guard instance that evaluates to {@code true} if the client is authorized to proceed,
      *         or {@code false} otherwise.
      */
     @Bean
     public Guard<jobStatus, jobEvent> isClientApprovingGuard() {
-        return context -> {
+        return context -> failClosed("isClientApprovingGuard", () -> {
             UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
             String providedToken = context.getMessageHeaders().get("inviteToken", String.class);
 
             if (jobId == null || providedToken == null) {
-                System.out.println("🛡️ Guard Blocked: Missing token or Job ID.");
                 return false;
             }
 
             Jobs job = jobRepository.findById(jobId).orElse(null);
-
-            if (job == null) {
+            if (job == null || job.getInviteToken() == null) {
                 return false;
             }
 
-            // 3. ZERO-TRUST CHECK: Does the provided token exactly match the database token?
-            boolean isAuthorized = providedToken.equals(job.getInviteToken());
+            // Constant-time compare against the token stored on the job.
+            boolean isAuthorized = MessageDigest.isEqual(
+                    job.getInviteToken().getBytes(StandardCharsets.UTF_8),
+                    providedToken.getBytes(StandardCharsets.UTF_8));
 
             if (!isAuthorized) {
-                System.out.println("🚨 SECURITY ALERT: Invalid token used attempting to release funds on Job " + jobId);
+                log.warn("SECURITY: invalid invite token used to accept job {}", jobId);
             }
 
             return isAuthorized;
-        };
+        });
     }
 
     /**
@@ -191,30 +193,26 @@ public class JobStateMachineConfig extends EnumStateMachineConfigurerAdapter<job
     }
 
     /**
-     * Guard implementation that checks whether the first milestone payment has been made.
-     * This guard evaluates the `milestoneSequence` and `isFunded` headers from the state machine's message context.
-     * The guard returns {@code true} if the `milestoneSequence` equals 1 and `isFunded` is {@code true}.
-     *
-     * @return a Guard instance that evaluates to {@code true} if the first milestone is paid,
-     *         or {@code false} otherwise.
+     * FUNDS_DEPOSITED (AWAITING_PAYMENT -> IN_PROGRESS).
+     * Passes only when the job's first milestone (lowest sequenceOrder) has a PAID payment
+     * request in the database. No "isFunded" or "milestoneSequence" header is read.
      */
     @Bean
     public Guard<jobStatus, jobEvent> firstMilestonePaidGuard() {
-        return context -> {
-            // getting sequence order
-            Integer sequence = context.getMessageHeaders().get("milestoneSequence", Integer.class);
-            // getting isFunded header
-            Boolean isFunded = context.getMessageHeaders().get("isFunded", Boolean.class);
-            return sequence != null && sequence == 1
-                    && isFunded != null && isFunded;
-        };
+        return context -> failClosed("firstMilestonePaidGuard", () -> {
+            UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
+            if (jobId == null) return false;
+
+            return milestoneRepository.findFirstByJobIdOrderBySequenceOrderAsc(jobId)
+                    .flatMap(first -> paymentRequestRepository.findByMilestoneIdAndStatus(first.getId(), PaymentRequestStatus.PAID))
+                    .isPresent();
+        });
     }
 
     /**
      * Guard implementation that verifies whether all milestones associated with a job
      * have been completed. This method implements a zero-trust policy by checking if
      * there are any milestones for the job that are not in a finished state.
-     *
      * The guard retrieves the `jobId` from the state machine context's message headers
      * and queries the `milestoneRepository` to check for unfinished milestones. If no
      * milestones are in an unfinished state, this guard passes (returns {@code true}).
@@ -225,98 +223,99 @@ public class JobStateMachineConfig extends EnumStateMachineConfigurerAdapter<job
      */
     @Bean
     public Guard<jobStatus, jobEvent> allMilestonesCompleted() {
-        return context -> {
+        return context -> failClosed("allMilestonesCompleted", () -> {
             UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
             if (jobId == null) return false;
 
-            // Zero-Trust Check: Does the database contain ANY milestones for this job
-            // that are NOT in a finished state?
-            boolean hasUnfinishedWork = milestoneRepository.existsByJobIdAndStatusNotIn(
+            // A job with no milestones has nothing completed.
+            if (milestoneRepository.findAllByJobId(jobId).isEmpty()) return false;
+
+            // Passes only if the database has no unfinished milestone for this job.
+            return !milestoneRepository.existsByJobIdAndStatusNotIn(
                     jobId,
                     List.of(MilestoneStatus.PAID_OUT, MilestoneStatus.CANCELLED)
             );
-
-            // If there is NO unfinished work, the guard passes (returns true)
-            if (hasUnfinishedWork) {
-                System.out.println("🛡️ Guard Blocked: Cannot submit job. Unfinished milestones exist.");
-                return false;
-            }
-
-            return true;
-        };
+        });
     }
 
     /**
-     * Guard implementation that checks whether a job has been approved.
-     * This guard examines the `isJobApproved` flag from the state machine's message headers.
-     * If the flag is present and evaluates to {@code true}, the guard allows the state transition.
-     * Otherwise, the transition is blocked.
-     *
-     * @return a Guard instance that evaluates to {@code true} if the job is approved,
-     *         or {@code false} otherwise.
+     * JOB_APPROVED (SUBMITTED -> APPROVED).
+     * The client approves a job by approving its last milestone, so this passes only when the
+     * database shows every milestone is PAID_OUT or CANCELLED and at least one was PAID_OUT.
      */
     @Bean
     public Guard<jobStatus, jobEvent> jobApprovedGuard() {
-        return context -> {
-            Boolean isJobApproved = (Boolean) context.getMessageHeaders().get("isJobApproved");
-            return isJobApproved != null && isJobApproved;
-        };
+        return context -> failClosed("jobApprovedGuard", () -> {
+            UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
+            return jobId != null && everyMilestonePaidOut(jobId);
+        });
     }
 
     /**
-     * Guard implementation that determines whether a job is eligible for release.
-     * This guard evaluates the `isJobReleased` flag from the state machine's message headers.
-     * If the flag is present and evaluates to {@code true}, the guard allows the state transition.
-     * Otherwise, the transition is blocked.
-     *
-     * @return a Guard instance that evaluates to {@code true} if the job is released,
-     *         or {@code false} otherwise.
+     * RELEASE_PAYMENT (APPROVED -> PAID_OUT).
+     * Escrow is released per milestone, so the job is paid out only when the database shows
+     * the same thing: every milestone PAID_OUT or CANCELLED, at least one PAID_OUT.
      */
     @Bean
     public Guard<jobStatus, jobEvent> jobReleasedGuard() {
-        return context -> {
-            Boolean isJobReleased = (Boolean) context.getMessageHeaders().get("isJobReleased");
-            return isJobReleased != null && isJobReleased;
-        };
+        return context -> failClosed("jobReleasedGuard", () -> {
+            UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
+            return jobId != null && everyMilestonePaidOut(jobId);
+        });
     }
 
     /**
-     * Guard implementation that checks whether a job is marked as disputed.
-     * This guard evaluates the `isJobDisputed` flag from the state machine's message headers.
-     * If the flag is present and evaluates to {@code true}, the guard allows the state transition.
-     * Otherwise, the transition is blocked.
-     *
-     * @return a Guard instance that evaluates to {@code true} if the job is disputed,
-     *         or {@code false} otherwise.
+     * RAISE_DISPUTE (SUBMITTED or IN_PROGRESS -> DISPUTED).
+     * Passes only when one of the job's milestones is already in a dispute state in the
+     * database. Who may dispute is checked on the milestone's RAISE_DISPUTE guard.
      */
     @Bean
     public Guard<jobStatus, jobEvent> jobDisputedGuard() {
-        return context -> {
-            log.info("====== GUARD EVALUATING ======");
-            log.info("HEADERS: " + context.getMessageHeaders());
-
-            Boolean isJobDisputed = (Boolean) context.getMessageHeaders().get("isJobDisputed");
-            boolean pass = isJobDisputed != null && isJobDisputed;
-
-            log.info("GUARD RESULT: " + pass);
-            return pass;
-        };
+        return context -> failClosed("jobDisputedGuard", () -> {
+            UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
+            return jobId != null && hasMilestoneInDispute(jobId);
+        });
     }
 
     /**
-     * Guard implementation that checks whether a job dispute has been resolved.
-     * This guard evaluates the `isJobDisputeResolved` flag from the state machine's message headers.
-     * If the flag is present and evaluates to {@code true}, the guard allows the state transition.
-     * Otherwise, the transition is blocked.
-     *
-     * @return a Guard instance that evaluates to {@code true} if the job dispute has been resolved,
-     *         or {@code false} otherwise.
+     * RESOLVE_DISPUTE (DISPUTED -> IN_PROGRESS).
+     * Passes only when no milestone on the job is still in a dispute state in the database.
      */
     @Bean
     public Guard<jobStatus, jobEvent> jobDisputeResolvedGuard() {
-        return context -> {
-            Boolean isJobDisputeResolved = (Boolean) context.getMessageHeaders().get("isJobDisputeResolved");
-            return isJobDisputeResolved != null && isJobDisputeResolved;
-        };
+        return context -> failClosed("jobDisputeResolvedGuard", () -> {
+            UUID jobId = context.getMessageHeaders().get("jobId", UUID.class);
+            return jobId != null && !milestoneRepository.findAllByJobId(jobId).isEmpty() && !hasMilestoneInDispute(jobId);
+        });
+    }
+
+    private static final List<MilestoneStatus> DISPUTE_STATES =
+            List.of(MilestoneStatus.DISPUTED_NEGOTIATION, MilestoneStatus.DISPUTE_ARBITRATION);
+
+    private boolean everyMilestonePaidOut(UUID jobId) {
+        List<Milestones> milestones = milestoneRepository.findAllByJobId(jobId);
+        if (milestones.isEmpty()) return false;
+
+        boolean allFinished = milestones.stream()
+                .allMatch(m -> m.getStatus() == MilestoneStatus.PAID_OUT || m.getStatus() == MilestoneStatus.CANCELLED);
+        boolean anyPaidOut = milestones.stream().anyMatch(m -> m.getStatus() == MilestoneStatus.PAID_OUT);
+        return allFinished && anyPaidOut;
+    }
+
+    private boolean hasMilestoneInDispute(UUID jobId) {
+        return milestoneRepository.findAllByJobId(jobId).stream()
+                .anyMatch(m -> DISPUTE_STATES.contains(m.getStatus()));
+    }
+
+    /** Any exception (bad header type, DB error) blocks the transition. */
+    private boolean failClosed(String guardName, Supplier<Boolean> check) {
+        try {
+            boolean allowed = Boolean.TRUE.equals(check.get());
+            log.info("Guard {}: {}", guardName, allowed ? "ALLOWED" : "BLOCKED");
+            return allowed;
+        } catch (RuntimeException e) {
+            log.warn("Guard {}: BLOCKED (error: {})", guardName, e.getMessage());
+            return false;
+        }
     }
 }

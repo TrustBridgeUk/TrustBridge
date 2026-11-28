@@ -6,10 +6,9 @@ import com.trustbridge.Domain.Enums.PaymentRequestStatus;
 import com.trustbridge.Domain.Repositories.PaymentRequestRepository;
 import com.trustbridge.Features.Payments.Events.MilestoneFundedEvent;
 import com.trustbridge.Features.Payments.StateMachine.Interceptors.PaymentRequestChangeInterceptor;
+import com.trustbridge.Security.Actor.GuardHeaders;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.statemachine.StateMachine;
 import org.springframework.statemachine.config.StateMachineFactory;
@@ -17,6 +16,7 @@ import org.springframework.statemachine.support.DefaultStateMachineContext;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -25,13 +25,11 @@ public class PaymentStateService {
 
     private final PaymentRequestRepository paymentRequestRepository;
 
-    @Autowired
+
     StateMachineFactory<PaymentRequestStatus, PaymentRequestEvent> stateMachineFactory;
 
-    @Autowired
     PaymentRequestChangeInterceptor interceptor;
 
-    @Autowired
     ApplicationEventPublisher eventPublisher;
 
     private StateMachine<PaymentRequestStatus, PaymentRequestEvent> buildStateMachine(UUID paymentId) {
@@ -57,56 +55,67 @@ public class PaymentStateService {
         return sm;
     }
 
-    public void fireEvent(UUID paymentId, PaymentRequestEvent event, String guardKey) {
+    /**
+     * Sends an event to the payment request's state machine. Only ids go in the headers
+     * (paymentRequestId, and actorId where a person is acting). The guards check the database
+     * and the provider. Throws if the request did not change state.
+     */
+    public void fireEvent(UUID paymentId, PaymentRequestEvent event, Map<String, Object> extraHeaders) {
         StateMachine<PaymentRequestStatus, PaymentRequestEvent> sm = buildStateMachine(paymentId);
+        PaymentRequestStatus before = sm.getState().getId();
 
-        Message<PaymentRequestEvent> message = MessageBuilder
+        MessageBuilder<PaymentRequestEvent> builder = MessageBuilder
                 .withPayload(event)
-                .setHeader("paymentRequestId", paymentId)
-                .setHeader(guardKey, true)
-                .build();
+                .setHeader("paymentRequestId", paymentId);
+        extraHeaders.forEach(builder::setHeader);
 
-        sm.sendEvent(Mono.just(message)).subscribe();
+        sm.sendEvent(Mono.just(builder.build())).blockLast();
 
-        sm.sendEvent(Mono.just(message)).subscribe(result -> {
-            if (result.getResultType() == org.springframework.statemachine.StateMachineEventResult.ResultType.DENIED) {
-                System.out.println("❌ TRANSITION DENIED! Event: " + event + " | Current DB State: " + sm.getState().getId());
-            } else if (result.getResultType() == org.springframework.statemachine.StateMachineEventResult.ResultType.ACCEPTED) {
-                System.out.println("✅ TRANSITION ACCEPTED! Event: " + event);
-            }
-        });
+        PaymentRequestStatus after = sm.getState().getId();
+        if (after == before) {
+            throw new IllegalStateException(
+                    "Transition blocked for event " + event + ": payment " + paymentId + " stayed in " + before);
+        }
     }
 
     public void initiatePayment(UUID paymentId) {
-        fireEvent(paymentId, PaymentRequestEvent.INITIATE_PAYMENT, "isPaymentInitiated");
+        fireEvent(paymentId, PaymentRequestEvent.INITIATE_PAYMENT, Map.of());
     }
 
     public void paymentSuccessful(UUID paymentId) {
-        fireEvent(paymentId, PaymentRequestEvent.PAYMENT_SUCCESSFUL, "isPaymentSuccessful");
+        fireEvent(paymentId, PaymentRequestEvent.PAYMENT_SUCCESSFUL, Map.of());
     }
 
     public void paymentFailed(UUID paymentId) {
-        fireEvent(paymentId, PaymentRequestEvent.PAYMENT_FAILED, "isPaymentFailed");
+        fireEvent(paymentId, PaymentRequestEvent.PAYMENT_FAILED, Map.of());
     }
 
     public void retryPayment(UUID paymentId) {
-        fireEvent(paymentId, PaymentRequestEvent.RETRY_PAYMENT, "isPaymentRetrying");
+        fireEvent(paymentId, PaymentRequestEvent.RETRY_PAYMENT, Map.of());
     }
 
     public void expirePayment(UUID paymentId) {
-        fireEvent(paymentId, PaymentRequestEvent.EXPIRE_REQUEST, "isPaymentExpired");
+        fireEvent(paymentId, PaymentRequestEvent.EXPIRE_REQUEST, Map.of());
     }
 
-    public void cancelPayment(UUID paymentId) {
-        fireEvent(paymentId, PaymentRequestEvent.CANCEL_REQUEST, "isPaymentCancelled");
+    /** @param actorId from CurrentActorResolver (the authenticated request) */
+    public void cancelPayment(UUID paymentId, UUID actorId) {
+        fireEvent(paymentId, PaymentRequestEvent.CANCEL_REQUEST, actorHeader(actorId));
     }
 
-    public void refundPayment(UUID paymentId) {
-        fireEvent(paymentId, PaymentRequestEvent.REFUND_REQUEST, "isPaymentRefunded");
+    /** @param actorId from CurrentActorResolver (the authenticated request) */
+    public void refundPayment(UUID paymentId, UUID actorId) {
+        fireEvent(paymentId, PaymentRequestEvent.REFUND_REQUEST, actorHeader(actorId));
     }
 
+    /** Throws (and announces nothing) unless the PAID transition actually happened. */
     public void confirmFunded(UUID paymentRequestId, UUID milestoneId) {
         paymentSuccessful(paymentRequestId);
         eventPublisher.publishEvent(new MilestoneFundedEvent(this, milestoneId));
     }
+
+    private static Map<String, Object> actorHeader(UUID actorId) {
+        return actorId == null ? Map.of() : Map.of(GuardHeaders.ACTOR_ID, actorId);
+    }
 }
+

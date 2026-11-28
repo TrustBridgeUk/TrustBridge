@@ -3,9 +3,11 @@ package com.trustbridge.Features.Jobs.Listeners;
 import com.trustbridge.Domain.Entities.Jobs;
 import com.trustbridge.Domain.Entities.Milestones;
 import com.trustbridge.Domain.Enums.JobStatus;
-import com.trustbridge.Domain.Enums.MilestoneStatus; // Adjust if your enum is named differently
-import com.trustbridge.Domain.Repositories.JobRepository;
+import com.trustbridge.Domain.Enums.PaymentRequestStatus;
 import com.trustbridge.Domain.Repositories.MilestoneRepository;
+import com.trustbridge.Domain.Repositories.PaymentRequestRepository;
+import com.trustbridge.Features.Jobs.Service.JobStateService;
+import com.trustbridge.Features.Jobs.Service.MilestoneStateService;
 import com.trustbridge.Features.Payments.Events.MilestoneFundedEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,37 +21,38 @@ import org.springframework.transaction.annotation.Transactional;
 public class MilestoneFundedEventListener {
 
     private final MilestoneRepository milestoneRepository;
-    private final JobRepository jobRepository;
+    private final PaymentRequestRepository paymentRequestRepository;
+    private final MilestoneStateService milestoneStateService;
+    private final JobStateService jobStateService;
 
     /**
-     * Handles the MilestoneFundedEvent by updating the status of the corresponding milestone
-     * and its associated job (if necessary).
-     *
-     * @param event the MilestoneFundedEvent containing information about the funded milestone,
-     *              including its unique identifier.
+     * A milestone was reported as funded. We do not take the event's word for it:
+     *  1. the milestone's payment request must be PAID in the database, and
+     *  2. the status change goes through the state machines, so their guards run and
+     *     the interceptors write the change (and the audit entry).
+     * It never sets a status directly.
      */
     @EventListener
     @Transactional
     public void handleMilestoneFunded(MilestoneFundedEvent event) {
-        log.info("Catching MilestoneFundedEvent for Milestone ID: {}", event.getMilestoneId());
-
         Milestones milestone = milestoneRepository.findById(event.getMilestoneId())
-                .orElseThrow(() -> new RuntimeException("Milestone not found for funding event!"));
+                .orElseThrow(() -> new IllegalStateException("Milestone not found for funding event"));
 
+        boolean paid = paymentRequestRepository
+                .findByMilestoneIdAndStatus(milestone.getId(), PaymentRequestStatus.PAID)
+                .isPresent();
 
-        milestone.setStatus(MilestoneStatus.IN_PROGRESS);
-        milestoneRepository.save(milestone);
+        if (!paid) {
+            log.warn("Ignoring MilestoneFundedEvent for milestone {}: payment request is not PAID", milestone.getId());
+            return;
+        }
 
-        log.info("Milestone {} successfully updated to IN_PROGRESS", milestone.getId());
+        milestoneStateService.fundsDeposited(milestone.getId());
 
         Jobs job = milestone.getJob();
-
-        if ("AWAITING_PAYMENT".equals(job.getStatus().name()) || "PENDING_ACCEPTANCE".equals(job.getStatus().name())) {
-
-            job.setStatus(JobStatus.jobStatus.IN_PROGRESS);
-            jobRepository.save(job);
-
-            log.info("Parent Job {} successfully updated to IN_PROGRESS", job.getId());
+        if (job.getStatus() == JobStatus.jobStatus.AWAITING_PAYMENT) {
+            // Job guard checks the job's first milestone is paid, in the database.
+            jobStateService.fundsDeposited(job.getId());
         }
     }
 }
